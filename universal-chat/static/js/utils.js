@@ -1,4 +1,11 @@
-let sessionId = crypto.randomUUID();
+function generateUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+let sessionId = generateUUID();
 const chatWindow = document.getElementById("chat-window");
 const messageInput = document.getElementById("message-input");
 const sendBtn = document.getElementById("send-btn");
@@ -311,7 +318,7 @@ async function sendMessage(overrideText) {
 async function resetChat() {
   // Generate a fresh session ID so AnythingLLM treats this as a brand-new conversation
   const oldSessionId = sessionId;
-  sessionId = crypto.randomUUID();
+  sessionId = generateUUID();
 
   try {
     await fetch(`/api/chat/${WORKSPACE_SLUG}`, {
