@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ name }}</title>
+  <link rel="stylesheet" href="/static/css/main.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+  <!-- ========== Page Header ========== -->
+  <div class="page-header-bar">
+    <div class="page-header-inner">
+      <div class="page-header-left">
+        <h1>{{ name }}</h1>
+        <p class="subtitle">Workspace {{ slug }}</p>
+      </div>
+      <div class="header-actions">
+        <a class="btn-reset" href="/settings?slug={{ slug }}">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Settings
+        </a>
+        <button class="btn-reset" onclick="resetChat()">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+          </svg>
+          Reset
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Page Body ========== -->
+  <div class="page-body">
+    <div class="chat-panel">
+
+      <!-- Panel label -->
+      <div class="chat-panel-header">
+        <span class="chat-panel-title">Conversation</span>
+        <span class="chat-panel-desc">Chat mode &mdash; rolling history</span>
+      </div>
+
+      <!-- Messages -->
+      <div id="chat-window" data-empty-text="Send a message to get started."></div>
+
+      <!-- Default Question Chips -->
+      <div id="default-questions-bar"></div>
+
+      <!-- Input -->
+      <div id="input-bar">
+        <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off" />
+        <button id="send-btn" onclick="sendMessage()">Send</button>
+      </div>
+
+    </div>
+  </div><!-- /.page-body -->
+
+  <!-- ========== Embed Snippet ========== -->
+  <div class="embed-snippet-section">
+    <div class="embed-snippet-inner">
+      <p class="embed-snippet-label">Embed this chat on any website</p>
+      <div class="embed-snippet-code-wrap">
+        <pre id="embed-snippet-code" class="embed-snippet-code"></pre>
+        <button class="embed-snippet-copy-btn" onclick="copyEmbedSnippet()" id="embed-copy-btn">Copy</button>
+      </div>
+      <p class="embed-snippet-hint">
+        Paste this tag into any HTML page. The chat will appear as a floating button.
+        Add <code>data-position="bottom-left"</code>, <code>data-theme="dark"</code>,
+        or <code>data-title="Ask us anything"</code> to customise the widget.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const WORKSPACE_SLUG = "{{ slug }}";
+    // Build embed snippet using the current page origin
+    (function () {
+      const origin = window.location.origin;
+      const snippet = `<script\n  src="${origin}/embed.js"\n  data-workspace="{{ slug }}"\n><\/script>`;
+      document.getElementById("embed-snippet-code").textContent = snippet;
+    })();
+
+    function copyEmbedSnippet() {
+      const code = document.getElementById("embed-snippet-code").textContent;
+      const btn  = document.getElementById("embed-copy-btn");
+      navigator.clipboard.writeText(code).then(() => {
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
+      }).catch(() => {
+        // Fallback for older browsers
+        const ta = document.createElement("textarea");
+        ta.value = code;
+        ta.style.position = "fixed";
+        ta.style.opacity  = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
+      });
+    }
+  </script>
+  <script src="/static/js/utils.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Workspace Not Found</title>
+  <link rel="stylesheet" href="/static/css/main.css" />
+</head>
+<body>
+
+  <div class="page-header-bar">
+    <div class="page-header-inner">
+      <div class="page-header-left">
+        <h1>{{ slug }}</h1>
+        <p class="subtitle">Workspace Chat</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="page-body">
+    <div class="not-found-panel">
+      <div class="not-found-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+      </div>
+      <h2 class="not-found-title">Workspace not found</h2>
+      <p class="not-found-desc">
+        No workspace named <strong>{{ slug }}</strong> exists.
+        Create it first using the API, then return to this page.
+      </p>
+    </div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings</title>
+  <link rel="stylesheet" href="/static/css/main.css" />
+</head>
+<body>
+
+  <!-- ========== Page Header ========== -->
+  <div class="page-header-bar">
+    <div class="page-header-inner">
+      <div class="page-header-left">
+        <h1>Settings</h1>
+        <p class="subtitle">Configure your chat experience</p>
+      </div>
+      <button class="btn-reset" id="back-btn">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        Back
+      </button>
+    </div>
+  </div>
+
+  <!-- ========== Page Body ========== -->
+  <div class="page-body settings-page-body">
+    <div class="settings-panel">
+
+      <div class="settings-panel-header">
+        <span class="settings-panel-title">Preferences</span>
+      </div>
+
+      <div class="settings-body">
+
+        <!-- ===== Workspace Name ===== -->
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <div class="settings-section-title-group">
+              <span class="settings-section-title">Workspace Name</span>
+              <span class="settings-section-desc">The display name shown as the chat title. The URL slug cannot be changed after creation.</span>
+            </div>
+          </div>
+          <div class="settings-name-row">
+            <input
+              type="text"
+              id="workspace-name-input"
+              class="dq-text-input settings-name-input"
+              placeholder="e.g. Admissions Office"
+              maxlength="200"
+            />
+            <span class="settings-slug-badge">/<span id="settings-slug-display"></span></span>
+          </div>
+        </div>
+
+        <!-- ===== Welcome Text ===== -->
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <div class="settings-section-title-group">
+              <span class="settings-section-title">Welcome Message</span>
+              <span class="settings-section-desc">Text shown in the empty chat window before the first message is sent.</span>
+            </div>
+          </div>
+          <div class="settings-name-row">
+            <input
+              type="text"
+              id="welcome-text-input"
+              class="dq-text-input settings-name-input"
+              placeholder="Send a message to get started."
+              maxlength="300"
+            />
+          </div>
+        </div>
+
+        <!-- ===== Follow-up Questions ===== -->
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <div class="settings-section-title-group">
+              <span class="settings-section-title">Follow-up Questions</span>
+              <span class="settings-section-desc">After each response, display suggested follow-up questions as clickable chips.</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="followup-enabled" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+          </div>
+
+          <div class="settings-sub-option" id="followup-count-row">
+            <label class="settings-sub-label" for="followup-count">Number of follow-up questions</label>
+            <div class="count-picker">
+              <button class="count-btn" id="count-decrement" aria-label="Decrease">&#8722;</button>
+              <span class="count-display" id="count-display">3</span>
+              <button class="count-btn" id="count-increment" aria-label="Increase">&#43;</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== Default Questions ===== -->
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <div class="settings-section-title-group">
+              <span class="settings-section-title">Default Questions</span>
+              <span class="settings-section-desc">Preset questions shown above the chat input. Organized into categories — click any question to send it instantly.</span>
+            </div>
+          </div>
+
+          <!-- Category list -->
+          <div id="dq-categories-list"></div>
+
+          <!-- Add category row -->
+          <div class="dq-add-category-row">
+            <input
+              type="text"
+              id="dq-new-category-input"
+              class="dq-text-input"
+              placeholder="New category name..."
+              maxlength="40"
+            />
+            <button class="dq-add-category-btn" id="dq-add-category-btn">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Category
+            </button>
+          </div>
+
+        </div>
+
+      </div>
+
+      <div class="settings-footer">
+        <span class="settings-saved-msg" id="saved-msg">Saved</span>
+        <button class="btn-save" id="save-btn">Save Settings</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ========== Unsaved Changes Modal ========== -->
+  <div id="unsaved-modal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h2 class="modal-title" id="modal-title">Unsaved changes</h2>
+      <p class="modal-body">You have unsaved changes. Leave without saving?</p>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-secondary" id="modal-stay-btn">Keep editing</button>
+        <button class="modal-btn modal-btn-danger" id="modal-leave-btn">Leave without saving</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const WORKSPACE_SLUG = "{{ slug }}";
+  </script>
+  <script src="/static/js/settings.js"></script>
+
+</body>
+</html>
