@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RhodyRAG Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" class="screen">
+    <div class="login-box">
+      <h1>RhodyRAG</h1>
+      <p class="subtitle">Admin Interface</p>
+      <form id="login-form">
+        <label for="api-key-input">API Key</label>
+        <input
+          type="password"
+          id="api-key-input"
+          placeholder="Enter your admin API key"
+          autocomplete="current-password"
+          required
+        />
+        <button type="submit">Access Admin Panel</button>
+        <p id="login-error" class="error-msg hidden"></p>
+      </form>
+    </div>
+  </div>
+
+  <!-- MAIN APP -->
+  <div id="app-screen" class="screen hidden">
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">RhodyRAG</span>
+        <button id="logout-btn" class="link-btn" title="Log out">Logout</button>
+      </div>
+      <nav>
+        <button class="nav-btn active" data-view="workspaces">Workspaces</button>
+        <button class="nav-btn" data-view="settings">Global Settings</button>
+      </nav>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main id="main-content">
+
+      <!-- WORKSPACES VIEW -->
+      <section id="view-workspaces" class="view active">
+        <div class="view-header">
+          <h2>Workspaces</h2>
+          <button id="new-workspace-btn" class="btn-primary">+ New Workspace</button>
+        </div>
+
+        <div id="workspace-list-container">
+          <p id="workspace-list-empty" class="muted hidden">No workspaces found.</p>
+          <table id="workspace-table" class="hidden">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Slug</th>
+                <th>LLM Model</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="workspace-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- WORKSPACE DETAIL VIEW -->
+      <section id="view-workspace-detail" class="view hidden">
+        <div class="view-header">
+          <button id="back-to-workspaces" class="link-btn">&larr; Back</button>
+          <h2 id="workspace-detail-name"></h2>
+        </div>
+
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="ws-settings">Settings</button>
+          <button class="tab-btn" data-tab="ws-documents">Documents</button>
+          <button class="tab-btn" data-tab="ws-query">Query</button>
+        </div>
+
+        <!-- Tab: Settings -->
+        <div id="ws-settings" class="tab-panel active">
+          <form id="workspace-settings-form" class="settings-form">
+            <div class="form-row">
+              <label>LLM Model</label>
+              <input type="text" name="llm_model" />
+            </div>
+            <div class="form-row">
+              <label>API Key</label>
+              <input type="password" name="api_key" />
+            </div>
+            <div class="form-row">
+              <label>Temperature</label>
+              <input type="number" name="temperature" step="0.01" min="0" max="1" />
+            </div>
+            <div class="form-row">
+              <label>Top N Chunks</label>
+              <input type="number" name="top_n" min="1" />
+            </div>
+            <div class="form-row">
+              <label>Similarity Threshold</label>
+              <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
+            </div>
+            <div class="form-row">
+              <label>Embed API Key</label>
+              <input type="password" name="embed_api_key" />
+            </div>
+            <div class="form-row full-width">
+              <label>System Prompt</label>
+              <textarea name="system_prompt" rows="4"></textarea>
+            </div>
+            <div class="form-row readonly-section">
+              <label>Chunk Size <span class="muted">(locked)</span></label>
+              <input type="text" name="chunk_size" disabled />
+            </div>
+            <div class="form-row readonly-section">
+              <label>Chunk Overlap <span class="muted">(locked)</span></label>
+              <input type="text" name="chunk_overlap" disabled />
+            </div>
+            <div class="form-row readonly-section">
+              <label>Embed Model <span class="muted">(locked)</span></label>
+              <input type="text" name="embed_model" disabled />
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">Save Changes</button>
+              <span id="ws-settings-msg" class="status-msg"></span>
+            </div>
+          </form>
+        </div>
+
+        <!-- Tab: Documents -->
+        <div id="ws-documents" class="tab-panel hidden">
+          <div class="doc-upload-section">
+            <h3>Upload Document</h3>
+            <form id="embed-form">
+              <div class="file-row">
+                <input type="file" id="embed-file-input" />
+                <button type="submit" class="btn-primary">Embed File</button>
+              </div>
+              <p id="embed-status" class="status-msg"></p>
+            </form>
+          </div>
+
+          <div class="doc-list-section">
+            <h3>Embedded Documents</h3>
+            <p id="doc-list-empty" class="muted hidden">No documents embedded yet.</p>
+            <table id="doc-table" class="hidden">
+              <thead>
+                <tr>
+                  <th>Filename</th>
+                  <th>Doc ID</th>
+                  <th>Chunks</th>
+                  <th>Uploaded</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="doc-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tab: Query -->
+        <div id="ws-query" class="tab-panel hidden">
+          <div class="query-area">
+            <form id="query-form">
+              <textarea
+                id="query-input"
+                placeholder="Enter your question..."
+                rows="3"
+              ></textarea>
+              <div class="query-actions">
+                <button type="submit" id="query-submit-btn" class="btn-primary">Ask</button>
+                <button type="button" id="query-clear-btn" class="btn-secondary">Clear</button>
+              </div>
+            </form>
+
+            <div id="query-result" class="hidden">
+              <h4>Answer</h4>
+              <div id="query-answer" class="answer-box"></div>
+
+              <h4>Sources</h4>
+              <div id="query-sources" class="sources-box"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CREATE WORKSPACE MODAL BACKDROP -->
+      <div id="create-workspace-modal" class="modal-backdrop hidden">
+        <div class="modal">
+          <div class="modal-header">
+            <h3>Create Workspace</h3>
+            <button id="close-modal-btn" class="link-btn">&times;</button>
+          </div>
+          <form id="create-workspace-form" class="settings-form">
+            <div class="form-row">
+              <label>Name <span class="required">*</span></label>
+              <input type="text" name="name" required />
+            </div>
+            <div class="form-row">
+              <label>LLM Model</label>
+              <input type="text" name="llm_model" placeholder="Leave blank to use global default" />
+            </div>
+            <div class="form-row">
+              <label>API Key</label>
+              <input type="password" name="api_key" />
+            </div>
+            <div class="form-row">
+              <label>Temperature</label>
+              <input type="number" name="temperature" step="0.01" min="0" max="1" placeholder="e.g. 0.7" />
+            </div>
+            <div class="form-row">
+              <label>Top N Chunks</label>
+              <input type="number" name="top_n" min="1" />
+            </div>
+            <div class="form-row">
+              <label>Similarity Threshold</label>
+              <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
+            </div>
+            <div class="form-row">
+              <label>Chunk Size <span class="muted">(locked after creation)</span></label>
+              <input type="number" name="chunk_size" placeholder="e.g. 1024" />
+            </div>
+            <div class="form-row">
+              <label>Chunk Overlap <span class="muted">(locked after creation)</span></label>
+              <input type="number" name="chunk_overlap" placeholder="e.g. 104" />
+            </div>
+            <div class="form-row">
+              <label>Embed Model <span class="muted">(locked after creation)</span></label>
+              <input type="text" name="embed_model" placeholder="Leave blank to use global default" />
+            </div>
+            <div class="form-row">
+              <label>Embed API Key</label>
+              <input type="password" name="embed_api_key" />
+            </div>
+            <div class="form-row full-width">
+              <label>System Prompt</label>
+              <textarea name="system_prompt" rows="3" placeholder="Leave blank to use global default"></textarea>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn-primary">Create Workspace</button>
+              <span id="create-workspace-msg" class="status-msg"></span>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- GLOBAL SETTINGS VIEW -->
+      <section id="view-settings" class="view hidden">
+        <div class="view-header">
+          <h2>Global Settings</h2>
+        </div>
+        <form id="global-settings-form" class="settings-form">
+          <div class="form-row">
+            <label>LLM Model</label>
+            <input type="text" name="llm_model" />
+          </div>
+          <div class="form-row">
+            <label>API Key</label>
+            <input type="password" name="api_key" />
+          </div>
+          <div class="form-row">
+            <label>Temperature</label>
+            <input type="number" name="temperature" step="0.01" min="0" max="1" />
+          </div>
+          <div class="form-row">
+            <label>Top N Chunks</label>
+            <input type="number" name="top_n" min="1" />
+          </div>
+          <div class="form-row">
+            <label>Similarity Threshold</label>
+            <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
+          </div>
+          <div class="form-row">
+            <label>Chunk Size</label>
+            <input type="number" name="chunk_size" min="1" />
+          </div>
+          <div class="form-row">
+            <label>Chunk Overlap</label>
+            <input type="number" name="chunk_overlap" min="0" />
+          </div>
+          <div class="form-row">
+            <label>Embed Model</label>
+            <input type="text" name="embed_model" />
+          </div>
+          <div class="form-row">
+            <label>Embed API Key</label>
+            <input type="password" name="embed_api_key" />
+          </div>
+          <div class="form-row full-width">
+            <label>System Prompt</label>
+            <textarea name="system_prompt" rows="4"></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary">Save Global Settings</button>
+            <span id="global-settings-msg" class="status-msg"></span>
+          </div>
+        </form>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

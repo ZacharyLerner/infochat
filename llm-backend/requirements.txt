@@ -1,0 +1,19 @@
+# Web framework
+fastapi[standard]
+uvicorn[standard]
+
+# LlamaIndex core + integrations
+llama-index-core
+llama-index-embeddings-litellm
+llama-index-llms-litellm
+llama-index-vector-stores-lancedb
+
+# Vector store
+lancedb
+pandas
+
+# LLM proxy (OpenAI-compatible gateway support)
+litellm
+
+# Environment variable loading
+python-dotenv
