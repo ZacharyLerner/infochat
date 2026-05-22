@@ -107,7 +107,7 @@ def query_workspace(workspace: dict, question: str) -> dict:
     }
 
 
-async def stream_query_workspace(workspace: dict, question: str) -> AsyncGenerator[str, None]:
+async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: str = "") -> AsyncGenerator[str, None]:
     """Stream a query response as Server-Sent Events.
 
     Bypasses the query engine's response synthesizer (which buffers the full
@@ -155,6 +155,8 @@ async def stream_query_workspace(workspace: dict, question: str) -> AsyncGenerat
         f"Query: {question}\n"
         f"Answer: "
     )
+    if prompt_suffix:
+        user_prompt += prompt_suffix
 
     messages = []
     if system_prompt:

@@ -117,6 +117,7 @@ class UpdateWorkspace(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str = Field(..., description="The question to ask against the workspace's embedded documents.")
+    prompt_suffix: Optional[str] = Field(None, description="Optional text appended to the LLM prompt only (not used for retrieval).")
 
 
 # --- Global settings ---------------------------------------------------------
@@ -276,7 +277,7 @@ async def stream_query_workspace(slug: str, body: QueryRequest):
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return StreamingResponse(
-        query.stream_query_workspace(ws, body.question),
+        query.stream_query_workspace(ws, body.question, prompt_suffix=body.prompt_suffix),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
