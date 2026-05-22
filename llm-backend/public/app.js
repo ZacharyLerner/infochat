@@ -405,18 +405,6 @@ embedForm.addEventListener('submit', async (e) => {
     const result = await res.json();
     showMsg(embedStatus, `Embedded ${result.chunks_embedded} chunks.`, 'success');
     embedFileInput.value = '';
-
-    await apiFetch(`/docs/${currentWorkspaceSlug}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        doc_id: result.doc_id,
-        filename: result.filename,
-        chunks_embedded: result.chunks_embedded,
-        uploaded_at: new Date().toISOString(),
-      }),
-    });
-
     loadDocList(currentWorkspaceSlug);
   } else {
     const err = await res.json().catch(() => ({}));
@@ -487,7 +475,6 @@ async function deleteDoc(slug, docId) {
   });
 
   if (res.ok) {
-    await apiFetch(`/docs/${slug}/${encodeURIComponent(docId)}`, { method: 'DELETE' });
     loadDocList(slug);
   } else {
     const err = await res.json().catch(() => ({}));

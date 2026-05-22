@@ -223,6 +223,19 @@ async def embed_file(slug: str, file: UploadFile = File(..., description="File t
     if chunks == 0:
         raise HTTPException(status_code=422, detail="No text could be extracted")
 
+    # Record in docs.json so the web view stays in sync regardless of upload source
+    from datetime import datetime, timezone
+    data = _read_docs()
+    if slug not in data:
+        data[slug] = []
+    data[slug].append({
+        "doc_id": doc_id,
+        "filename": file.filename,
+        "chunks_embedded": chunks,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    })
+    _write_docs(data)
+
     return {"status": "ok", "slug": slug, "filename": file.filename,
             "doc_id": doc_id, "chunks_embedded": chunks}
 
@@ -233,6 +246,13 @@ def delete_embed(slug: str, doc_id: str = None):
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     deleted = embedding.delete_workspace_file(slug, doc_id)
+
+    # Keep docs.json in sync
+    data = _read_docs()
+    if slug in data:
+        data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
+    _write_docs(data)
+
     return {"status": "ok", "slug": slug, "doc_id": doc_id, "chunks_deleted": deleted}
 
 
