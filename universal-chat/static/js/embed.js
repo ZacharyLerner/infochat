@@ -698,8 +698,9 @@
     );
 
     let messageToSend = text;
+    let followupSuffix = "";
     if (settings.followup_enabled) {
-      messageToSend += buildFollowUpSuffix(settings.followup_count);
+      followupSuffix = buildFollowUpSuffix(settings.followup_count);
     }
 
     let fullText = "";
@@ -710,7 +711,7 @@
       const res = await fetch(`${serverOrigin}/api/chat/${encodeURIComponent(slug)}`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false }),
+        body:    JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false, followup_suffix: followupSuffix }),
       });
 
       if (!res.ok) throw new Error(`Server error ${res.status}`);

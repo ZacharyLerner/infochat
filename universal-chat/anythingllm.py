@@ -4,7 +4,7 @@ from typing import AsyncGenerator
 from config import API_URL, HEADERS
 
 
-async def stream_chat(slug: str, message: str, session_id: str, reset: bool = False) -> AsyncGenerator[str, None]:
+async def stream_chat(slug: str, message: str, session_id: str, reset: bool = False, followup_suffix: str = "") -> AsyncGenerator[str, None]:
     """Stream a chat response from RhodyRAG, translating its SSE event format
     into the data:{textResponse, sources} format the frontend expects.
 
@@ -16,9 +16,14 @@ async def stream_chat(slug: str, message: str, session_id: str, reset: bool = Fa
     The frontend expects bare data-only SSE lines whose payload is JSON:
       data: {"textResponse": "..."}
       data: {"textResponse": "", "sources": [...]}
+
+    followup_suffix is passed as prompt_suffix to the RAG backend so it is
+    appended to the LLM prompt only — never used for vector retrieval.
     """
     url = f"{API_URL}/workspace/{slug}/query/stream"
-    payload = {"question": message}
+    payload: dict = {"question": message}
+    if followup_suffix:
+        payload["prompt_suffix"] = followup_suffix
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream("POST", url, json=payload, headers=HEADERS) as response:

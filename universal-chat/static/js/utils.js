@@ -209,10 +209,12 @@ async function sendMessage(overrideText) {
   appendMessage("user", escapeHtml(text));
   const bubble = appendMessage("assistant", '<span class="typing-indicator"><span></span><span></span><span></span></span>');
 
-  // Build the message to send — append follow-up suffix if enabled
+  // Build the message to send — keep the clean question separate from the
+  // follow-up suffix so the RAG backend uses only the question for retrieval.
   let messageToSend = text;
+  let followupSuffix = "";
   if (settings.followup_enabled) {
-    messageToSend += buildFollowUpPromptSuffix(settings.followup_count);
+    followupSuffix = buildFollowUpPromptSuffix(settings.followup_count);
   }
 
   let fullText = "";
@@ -223,7 +225,7 @@ async function sendMessage(overrideText) {
     const res = await fetch(`/api/chat/${WORKSPACE_SLUG}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false }),
+      body: JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false, followup_suffix: followupSuffix }),
     });
 
     if (!res.ok) throw new Error(`Server error ${res.status}`);
@@ -262,10 +264,9 @@ async function sendMessage(overrideText) {
           // Sources arrive on the final chunk
           if (chunk.sources && chunk.sources.length > 0) {
             sources = chunk.sources;
-            console.debug("[chat] sources received:", sources.length, sources.map(s => s.title));
           }
-        } catch (parseErr) {
-          console.debug("[chat] parse error:", parseErr.message, "raw preview:", typeof raw === "string" ? raw.slice(0, 80) : raw);
+        } catch (_) {
+          // malformed chunk — skip
         }
       }
     }

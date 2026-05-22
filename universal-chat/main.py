@@ -86,6 +86,7 @@ async def chat_endpoint(slug: str, body: ChatRequest, db: Session = Depends(get_
             message=body.message,
             session_id=body.session_id,
             reset=body.reset,
+            followup_suffix=body.followup_suffix,
         ),
         media_type="text/event-stream",
     )
