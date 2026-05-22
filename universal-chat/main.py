@@ -76,7 +76,10 @@ async def chat_page(request: Request, slug: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat/{slug}", include_in_schema=False)
-async def chat_endpoint(slug: str, body: ChatRequest):
+async def chat_endpoint(slug: str, body: ChatRequest, db: Session = Depends(get_db)):
+    ws = db.get(orm_models.Workspace, slug)
+    if not ws:
+        raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
     return StreamingResponse(
         anythingllm.stream_chat(
             slug=slug,

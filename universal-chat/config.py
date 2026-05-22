@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# AnythingLLM connection
+# RhodyRAG (LLM_Backend_Dev) connection
 # ---------------------------------------------------------------------------
-API_URL: str = os.getenv("AnythingLLM_API_URL", "")
-API_KEY: str = os.getenv("AnythingLLM_API_Key", "")
-HEADERS: dict = {"Authorization": f"Bearer {API_KEY}"}
+API_URL: str = os.getenv("RAG_API_URL", "http://localhost:3001")
+API_KEY: str = os.getenv("RAG_API_KEY", "")
+HEADERS: dict = {"X-API-Key": API_KEY} if API_KEY else {}
