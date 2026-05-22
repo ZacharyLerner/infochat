@@ -262,11 +262,12 @@ def delete_embed(slug: str, doc_id: str = None):
 
 # --- Query -------------------------------------------------------------------
 @app.post("/workspace/{slug}/query", summary="Query a workspace")
-def query_workspace(slug: str, body: QueryRequest):
+async def query_workspace(slug: str, body: QueryRequest):
     ws = db.get_workspace(slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    return query.query_workspace(ws, body.question)
+    import asyncio
+    return await asyncio.to_thread(query.query_workspace, ws, body.question)
 
 
 @app.post("/workspace/{slug}/query/stream", summary="Stream a query response")
