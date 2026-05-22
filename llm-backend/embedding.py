@@ -93,12 +93,12 @@ def delete_workspace_file(slug: str, doc_id: str) -> int:
     tbl = db.open_table(tname)
     # Count matching rows before deletion
     try:
-        count = len(tbl.search().where(f"metadata_doc_id = '{doc_id}'").to_list())
+        count = len(tbl.search().where(f"doc_id = '{doc_id}'").to_list())
     except Exception:
         count = 0
 
     if count > 0:
-        tbl.delete(f"metadata_doc_id = '{doc_id}'")
+        tbl.delete(f"doc_id = '{doc_id}'")
     return count
 
 
@@ -140,9 +140,9 @@ def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
     # Assign a unique doc_id for tracking/deletion
     doc_id = str(uuid.uuid4())
     for doc in documents:
+        doc.doc_id = doc_id          # sets ref_doc_id on all child nodes → top-level doc_id col in LanceDB
         doc.metadata["filename"] = filename
         doc.metadata["doc_id"] = doc_id
-        doc.metadata["metadata_doc_id"] = doc_id
 
     # Chunk documents
     splitter = SentenceSplitter(
