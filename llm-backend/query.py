@@ -23,13 +23,14 @@ import db
 from embedding import build_embed_model, get_vector_store
 
 
-def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "") -> LiteLLM:
+def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "", max_tokens: int = 1024) -> LiteLLM:
     return LiteLLM(
         model=llm_model,
         api_base=config.API_BASE,
         api_key=api_key,
         temperature=temperature,
         system_prompt=system_prompt or None,
+        max_tokens=max_tokens,
     )
 
 
@@ -58,7 +59,7 @@ def query_workspace(workspace: dict, question: str) -> dict:
         return {"answer": "No documents have been embedded in this workspace yet.", "sources": []}
 
     query_engine = index.as_query_engine(
-        llm=build_llm(workspace["llm_model"], workspace["api_key"], workspace["temperature"], workspace["system_prompt"]),
+        llm=build_llm(workspace["llm_model"], workspace["api_key"], workspace["temperature"], workspace["system_prompt"], workspace.get("max_tokens", 1024)),
         similarity_top_k=workspace["top_n"],
         node_postprocessors=[
             SimilarityPostprocessor(
@@ -136,7 +137,7 @@ async def stream_query_workspace(workspace: dict, question: str) -> AsyncGenerat
     messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
 
     # --- Step 3: Stream directly from the LLM ---
-    llm = build_llm(workspace["llm_model"], workspace["api_key"], workspace["temperature"], workspace["system_prompt"])
+    llm = build_llm(workspace["llm_model"], workspace["api_key"], workspace["temperature"], workspace["system_prompt"], workspace.get("max_tokens", 1024))
     response_gen = await llm.astream_chat(messages)
 
     async for chat_response in response_gen:

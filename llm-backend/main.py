@@ -99,6 +99,7 @@ class CreateWorkspace(BaseModel):
     chunk_overlap: Optional[int] = Field(None, description="Token overlap between consecutive chunks. Locked after creation for the same reason as chunk_size.")
     embed_model: Optional[str] = Field(None, description="Embedding model for this workspace. Locked after creation — changing it would cause vector dimension mismatches. Falls back to the global default if blank. Use 'direct-openai/<model>' to bypass the gateway.")
     embed_api_key: Optional[str] = Field(None, description="API key for the embedding model. Only needed when using a direct-openai/ embedding model that requires its own key separate from the LLM gateway key.")
+    max_tokens: Optional[int] = Field(None, description="Maximum number of tokens the LLM may generate in a single response.")
 
 
 class UpdateWorkspace(BaseModel):
@@ -111,6 +112,7 @@ class UpdateWorkspace(BaseModel):
     top_n: Optional[int] = Field(None)
     similarity_threshold: Optional[float] = Field(None)
     embed_api_key: Optional[str] = Field(None)
+    max_tokens: Optional[int] = Field(None)
 
 
 class QueryRequest(BaseModel):
@@ -129,6 +131,7 @@ class UpdateSettings(BaseModel):
     chunk_overlap: Optional[int] = None
     embed_model: Optional[str] = None
     embed_api_key: Optional[str] = None
+    max_tokens: Optional[int] = None
 
 
 @app.get("/settings", summary="Get global settings")
@@ -162,6 +165,7 @@ def create_workspace(body: CreateWorkspace):
         chunk_overlap=body.chunk_overlap if body.chunk_overlap is not None else 104,
         embed_model=body.embed_model or "",
         embed_api_key=body.embed_api_key or "",
+        max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
     )
     manager.on_workspace_created(slug=ws["slug"], name=ws["name"])
     return ws
