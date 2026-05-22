@@ -262,9 +262,10 @@ async function sendMessage(overrideText) {
           // Sources arrive on the final chunk
           if (chunk.sources && chunk.sources.length > 0) {
             sources = chunk.sources;
+            console.debug("[chat] sources received:", sources.length, sources.map(s => s.title));
           }
-        } catch (_) {
-          // malformed chunk — skip
+        } catch (parseErr) {
+          console.debug("[chat] parse error:", parseErr.message, "raw preview:", typeof raw === "string" ? raw.slice(0, 80) : raw);
         }
       }
     }
