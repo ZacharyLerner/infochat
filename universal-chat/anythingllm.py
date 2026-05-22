@@ -29,7 +29,11 @@ async def stream_chat(slug: str, message: str, session_id: str, reset: bool = Fa
                 if line.startswith("event:"):
                     event_type = line[len("event:"):].strip()
                 elif line.startswith("data:"):
-                    raw = line[len("data:"):].strip()
+                    # Strip only the leading space after "data:" — do NOT rstrip,
+                    # as trailing spaces are meaningful token deltas from the LLM.
+                    raw = line[len("data:"):]
+                    if raw.startswith(" "):
+                        raw = raw[1:]
 
                     if event_type == "token":
                         # Unescape \\n back to real newlines for rendering
