@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 import config
 import db
 import embedding
+import manager
 import query
 
 # --- Doc tracking (JSON file) ------------------------------------------------
@@ -102,6 +103,7 @@ class CreateWorkspace(BaseModel):
 
 class UpdateWorkspace(BaseModel):
     """Mutable workspace settings."""
+    name: Optional[str] = Field(None, description="New display name for the workspace.")
     llm_model: Optional[str] = Field(None)
     api_key: Optional[str] = Field(None)
     temperature: Optional[float] = Field(None)
@@ -161,6 +163,7 @@ def create_workspace(body: CreateWorkspace):
         embed_model=body.embed_model or "",
         embed_api_key=body.embed_api_key or "",
     )
+    manager.on_workspace_created(slug=ws["slug"], name=ws["name"])
     return ws
 
 
@@ -176,7 +179,10 @@ def get_workspace(slug: str):
 def update_workspace(slug: str, body: UpdateWorkspace):
     if db.get_workspace(slug) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    return db.update_workspace(slug, **body.model_dump())
+    ws = db.update_workspace(slug, **body.model_dump())
+    if body.name is not None:
+        manager.on_workspace_renamed(slug=slug, new_name=body.name)
+    return ws
 
 
 @app.delete("/workspace/{slug}", summary="Delete a workspace")
@@ -197,6 +203,7 @@ def delete_workspace(slug: str):
     _write_docs(data)
 
     db.delete_workspace(slug)
+    manager.on_workspace_deleted(slug=slug)
     return {"status": "ok", "slug": slug}
 
 

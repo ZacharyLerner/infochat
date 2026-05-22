@@ -113,7 +113,7 @@ def _generate_slug(name: str) -> str:
     """Generate a URL-safe slug from a workspace name."""
     base = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in name.lower())
     base = base.strip("-")[:40]
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
     return f"{base}-{suffix}"
 
 
@@ -177,7 +177,7 @@ def get_workspace(slug: str) -> Optional[dict]:
 def update_workspace(slug: str, **fields) -> Optional[dict]:
     """Update any subset of settings fields. Returns the updated workspace."""
     allowed = {
-        "llm_model", "api_key", "temperature", "system_prompt",
+        "name", "llm_model", "api_key", "temperature", "system_prompt",
         "top_n", "similarity_threshold", "embed_api_key",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
