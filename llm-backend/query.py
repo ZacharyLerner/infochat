@@ -23,8 +23,33 @@ import db
 from embedding import build_embed_model, get_vector_store
 
 
+# Gateway model strings are not in LiteLLM's registry, so it falls back to a
+# 2048-token context window. With max_tokens near that ceiling, LlamaIndex
+# calculates negative available context and raises ValueError before the query
+# reaches the LLM. We subclass to override the metadata property with a fixed
+# large window; LlamaIndex only uses this for prompt budgeting — the gateway
+# enforces the real model limit.
+_CONTEXT_WINDOW = 128_000
+
+
+class _GatewayLiteLLM(LiteLLM):
+    """LiteLLM with a fixed context_window for unrecognised gateway model strings."""
+
+    @property
+    def metadata(self):
+        from llama_index.core.llms import LLMMetadata
+        base = super().metadata
+        return LLMMetadata(
+            context_window=_CONTEXT_WINDOW,
+            num_output=base.num_output,
+            is_chat_model=base.is_chat_model,
+            is_function_calling_model=base.is_function_calling_model,
+            model_name=base.model_name,
+        )
+
+
 def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "", max_tokens: int = 1024) -> LiteLLM:
-    return LiteLLM(
+    return _GatewayLiteLLM(
         model=llm_model,
         api_base=config.API_BASE,
         api_key=api_key,
