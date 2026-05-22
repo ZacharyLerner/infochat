@@ -312,9 +312,9 @@ workspaceSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = formToObj(workspaceSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
-    'similarity_threshold', 'system_prompt', 'embed_api_key',
+    'similarity_threshold', 'system_prompt', 'embed_api_key', 'max_tokens',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens']);
 
   showMsg(wsSettingsMsg, 'Saving...');
   const res = await apiFetch(`/workspace/${currentWorkspaceSlug}`, {
@@ -361,9 +361,9 @@ createWorkspaceForm.addEventListener('submit', async (e) => {
   const data = formToObj(createWorkspaceForm, [
     'name', 'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt',
+    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
 
   showMsg(createWorkspaceMsg, 'Creating...');
   const res = await apiFetch('/workspace', {
@@ -617,9 +617,9 @@ globalSettingsForm.addEventListener('submit', async (e) => {
   const data = formToObj(globalSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt',
+    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
 
   showMsg(globalSettingsMsg, 'Saving...');
   const res = await apiFetch('/settings', {
