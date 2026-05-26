@@ -119,68 +119,81 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
     from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
     try:
-        index = await asyncio.to_thread(_build_index, workspace)
-    except TableNotFoundError:
-        yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
-        yield "event: sources\ndata: []\n\n"
+        try:
+            index = await asyncio.to_thread(_build_index, workspace)
+        except TableNotFoundError:
+            yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
+            yield "event: sources\ndata: []\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+            return
+
+        # --- Step 1: Retrieve relevant nodes ---
+        retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
+        nodes = await retriever.aretrieve(question)
+
+        # Apply similarity threshold post-processing
+        threshold = workspace["similarity_threshold"]
+        nodes = [n for n in nodes if n.score is None or n.score >= threshold]
+
+        if not nodes:
+            yield "event: token\ndata: No relevant documents found for your question.\n\n"
+            yield "event: sources\ndata: []\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+            return
+
+        # --- Step 2: Build the prompt with retrieved context ---
+        context_str = "\n\n".join(
+            n.node.get_content() for n in nodes
+        )
+
+        system_prompt = workspace["system_prompt"] or ""
+        user_prompt = (
+            f"Context information is below.\n"
+            f"---------------------\n"
+            f"{context_str}\n"
+            f"---------------------\n"
+            f"Given the context information and not prior knowledge, answer the query.\n"
+            f"Query: {question}\n"
+            f"Answer: "
+        )
+        if prompt_suffix:
+            user_prompt += prompt_suffix
+
+        messages = []
+        if system_prompt:
+            messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
+        messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
+
+        # --- Step 3: Stream directly from the LLM ---
+        llm = build_llm(workspace["llm_model"], workspace["api_key"], workspace["temperature"], workspace["system_prompt"], workspace.get("max_tokens", 1024))
+        try:
+            response_gen = await llm.astream_chat(messages)
+            async for chat_response in response_gen:
+                token = chat_response.delta
+                if token:
+                    safe = token.replace('\n', '\\n')
+                    yield f"event: token\ndata: {safe}\n\n"
+        except Exception as exc:
+            error_msg = str(exc).replace('\n', ' ')
+            yield f"event: error\ndata: {error_msg}\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+            return
+
+        # --- Step 4: Emit sources ---
+        sources = [
+            {
+                "score": node.score,
+                "filename": node.node.metadata.get("filename"),
+                "text": node.node.get_content()[:200],
+            }
+            for node in nodes
+        ]
+        yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
-        return
 
-    # --- Step 1: Retrieve relevant nodes ---
-    retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
-    nodes = await retriever.aretrieve(question)
-
-    # Apply similarity threshold post-processing
-    threshold = workspace["similarity_threshold"]
-    nodes = [n for n in nodes if n.score is None or n.score >= threshold]
-
-    if not nodes:
-        yield "event: token\ndata: No relevant documents found for your question.\n\n"
-        yield "event: sources\ndata: []\n\n"
+    except Exception as exc:
+        # Catch-all: ensure the stream always terminates cleanly even for
+        # unexpected errors (retrieval failures, encoding issues, etc.)
+        error_msg = str(exc).replace('\n', ' ')
+        yield f"event: error\ndata: {error_msg}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
-        return
-
-    # --- Step 2: Build the prompt with retrieved context ---
-    context_str = "\n\n".join(
-        n.node.get_content() for n in nodes
-    )
-
-    system_prompt = workspace["system_prompt"] or ""
-    user_prompt = (
-        f"Context information is below.\n"
-        f"---------------------\n"
-        f"{context_str}\n"
-        f"---------------------\n"
-        f"Given the context information and not prior knowledge, answer the query.\n"
-        f"Query: {question}\n"
-        f"Answer: "
-    )
-    if prompt_suffix:
-        user_prompt += prompt_suffix
-
-    messages = []
-    if system_prompt:
-        messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
-    messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
-
-    # --- Step 3: Stream directly from the LLM ---
-    llm = build_llm(workspace["llm_model"], workspace["api_key"], workspace["temperature"], workspace["system_prompt"], workspace.get("max_tokens", 1024))
-    response_gen = await llm.astream_chat(messages)
-
-    async for chat_response in response_gen:
-        token = chat_response.delta
-        if token:
-            safe = token.replace('\n', '\\n')
-            yield f"event: token\ndata: {safe}\n\n"
-
-    # --- Step 4: Emit sources ---
-    sources = [
-        {
-            "score": node.score,
-            "filename": node.node.metadata.get("filename"),
-            "text": node.node.get_content()[:200],
-        }
-        for node in nodes
-    ]
-    yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
-    yield "event: done\ndata: [DONE]\n\n"

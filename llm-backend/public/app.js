@@ -534,6 +534,8 @@ queryForm.addEventListener('submit', async (e) => {
         queryAnswer.textContent += data.replace(/\\n/g, '\n');
       } else if (eventName === 'sources') {
         try { renderSources(JSON.parse(data)); } catch {}
+      } else if (eventName === 'error') {
+        queryAnswer.textContent = `Error: ${data}`;
       }
       eventName = '';
       dataLines = [];
