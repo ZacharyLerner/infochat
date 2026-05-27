@@ -4,18 +4,59 @@ from typing import AsyncGenerator
 from config import API_URL, HEADERS
 
 
+def _translate_sse_lines(event_type: str | None, raw: str) -> str | None:
+    """Translate a single RhodyRAG SSE data line into the frontend's JSON format.
+
+    RhodyRAG emits:  event: token|sources|done  /  data: <payload>
+    Frontend expects: data: {"textResponse": "..."} or data: {"textResponse": "", "sources": [...]}
+
+    Returns the translated SSE line string, or None if nothing should be emitted.
+    """
+    if event_type == "token":
+        text = raw.replace("\\n", "\n")
+        return f"data: {json.dumps({'textResponse': text})}\n\n"
+
+    elif event_type == "sources":
+        try:
+            sources = json.loads(raw)
+        except json.JSONDecodeError:
+            sources = []
+        mapped = [
+            {
+                "title": s.get("filename", "Source"),
+                "url": "",
+                "score": s.get("score"),
+                "text": s.get("text", ""),
+            }
+            for s in sources
+        ]
+        return f"data: {json.dumps({'textResponse': '', 'sources': mapped})}\n\n"
+
+    return None
+
+
+async def _iter_rhodyrag_sse(response: httpx.Response) -> AsyncGenerator[str, None]:
+    """Shared SSE-translation iterator for RhodyRAG streaming responses."""
+    event_type = None
+    async for line in response.aiter_lines():
+        if line.startswith("event:"):
+            event_type = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            raw = line[len("data:"):]
+            if raw.startswith(" "):
+                raw = raw[1:]
+            translated = _translate_sse_lines(event_type, raw)
+            if translated:
+                yield translated
+        elif line == "":
+            event_type = None
+
+
 async def stream_chat(slug: str, message: str, session_id: str, reset: bool = False, followup_suffix: str = "") -> AsyncGenerator[str, None]:
-    """Stream a chat response from RhodyRAG, translating its SSE event format
-    into the data:{textResponse, sources} format the frontend expects.
+    """Stream a one-off query response from RhodyRAG (stateless, no session memory).
 
-    RhodyRAG emits three named event types:
-      event: token  / data: <raw text delta>   (newlines escaped as \\n)
-      event: sources / data: <json array>
-      event: done   / data: [DONE]
-
-    The frontend expects bare data-only SSE lines whose payload is JSON:
-      data: {"textResponse": "..."}
-      data: {"textResponse": "", "sources": [...]}
+    Translates RhodyRAG's named SSE event format into the data:{textResponse, sources}
+    format the frontend expects.
 
     followup_suffix is passed as prompt_suffix to the RAG backend so it is
     appended to the LLM prompt only — never used for vector retrieval.
@@ -28,46 +69,36 @@ async def stream_chat(slug: str, message: str, session_id: str, reset: bool = Fa
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream("POST", url, json=payload, headers=HEADERS) as response:
             response.raise_for_status()
+            async for line in _iter_rhodyrag_sse(response):
+                yield line
 
-            event_type = None
-            async for line in response.aiter_lines():
-                if line.startswith("event:"):
-                    event_type = line[len("event:"):].strip()
-                elif line.startswith("data:"):
-                    # Strip only the leading space after "data:" — do NOT rstrip,
-                    # as trailing spaces are meaningful token deltas from the LLM.
-                    raw = line[len("data:"):]
-                    if raw.startswith(" "):
-                        raw = raw[1:]
 
-                    if event_type == "token":
-                        # Unescape \\n back to real newlines for rendering
-                        text = raw.replace("\\n", "\n")
-                        yield f"data: {json.dumps({'textResponse': text})}\n\n"
+async def stream_chat_session(
+    slug: str,
+    session_id: str,
+    message: str,
+    history: list[dict] | None = None,
+    followup_suffix: str = "",
+) -> AsyncGenerator[str, None]:
+    """Stream a chat response using a persistent ChatEngine session on RhodyRAG.
 
-                    elif event_type == "sources":
-                        try:
-                            sources = json.loads(raw)
-                        except json.JSONDecodeError:
-                            sources = []
-                        # Map RhodyRAG source fields to what the frontend renders:
-                        # frontend uses: source.title and source.url (citation links)
-                        # RhodyRAG provides: filename, score, text
-                        mapped = [
-                            {
-                                "title": s.get("filename", "Source"),
-                                "url": "",
-                                "score": s.get("score"),
-                                "text": s.get("text", ""),
-                            }
-                            for s in sources
-                        ]
-                        yield f"data: {json.dumps({'textResponse': '', 'sources': mapped})}\n\n"
+    Sends the last 6 turns of conversation history alongside the message so the
+    backend can re-seed the LlamaIndex ChatEngine after a server restart.
 
-                    elif event_type == "done":
-                        # Terminal sentinel — nothing to emit
-                        pass
+    followup_suffix is appended to the LLM prompt only (not used for retrieval).
+    """
+    url = f"{API_URL}/workspace/{slug}/chat/{session_id}/stream"
+    payload: dict = {
+        "message": message,
+        "history": (history or [])[-6:],
+    }
+    if followup_suffix:
+        # Append suffix to message — the chat engine passes the full message to
+        # the LLM, so this surfaces in the prompt without affecting retrieval.
+        payload["message"] = message + followup_suffix
 
-                elif line == "":
-                    # Blank line resets the current event type (SSE spec)
-                    event_type = None
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", url, json=payload, headers=HEADERS) as response:
+            response.raise_for_status()
+            async for line in _iter_rhodyrag_sse(response):
+                yield line

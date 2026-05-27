@@ -24,24 +24,35 @@
           </svg>
           Settings
         </a>
-        <button class="btn-reset" onclick="resetChat()">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="23 4 23 10 17 10"/>
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-          </svg>
-          Reset
-        </button>
       </div>
     </div>
   </div>
 
-  <!-- ========== Page Body ========== -->
+  <!-- ========== Page Body (sidebar + chat) ========== -->
   <div class="page-body">
+
+    <!-- ===== Sessions Sidebar ===== -->
+    <aside class="sessions-sidebar">
+      <div class="sessions-sidebar-header">
+        <span class="sessions-sidebar-title">Chats</span>
+        <button class="btn-new-chat" id="new-chat-btn" onclick="startNewChat()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          New Chat
+        </button>
+      </div>
+      <div class="session-list" id="session-list">
+        <!-- Populated by renderSessionList() in utils.js -->
+      </div>
+    </aside>
+
+    <!-- ===== Chat Panel ===== -->
     <div class="chat-panel">
 
       <!-- Panel label -->
       <div class="chat-panel-header">
-        <span class="chat-panel-title">Conversation</span>
+        <span class="chat-panel-title" id="chat-panel-title">Conversation</span>
         <span class="chat-panel-desc">Chat mode &mdash; rolling history</span>
       </div>
 
@@ -53,7 +64,7 @@
 
       <!-- Input -->
       <div id="input-bar">
-        <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off" />
+        <textarea id="message-input" placeholder="Type a message..." rows="1" autocomplete="off"></textarea>
         <button id="send-btn" onclick="sendMessage()">Send</button>
       </div>
 
@@ -93,7 +104,6 @@
         btn.classList.add("copied");
         setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
       }).catch(() => {
-        // Fallback for older browsers
         const ta = document.createElement("textarea");
         ta.value = code;
         ta.style.position = "fixed";
@@ -108,7 +118,7 @@
       });
     }
   </script>
-  <script src="/static/js/utils.js?v=2"></script>
+  <script src="/static/js/utils.js?v=3"></script>
 
 </body>
 </html>

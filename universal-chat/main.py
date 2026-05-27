@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 import os
 
 import anythingllm
-from models import ChatRequest
+from models import ChatRequest, ChatSessionRequest
 from db import engine, get_db
 import orm_models
 from schemas import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
@@ -86,6 +86,59 @@ async def chat_endpoint(slug: str, body: ChatRequest, db: Session = Depends(get_
             message=body.message,
             session_id=body.session_id,
             reset=body.reset,
+            followup_suffix=body.followup_suffix,
+        ),
+        media_type="text/event-stream",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Persistent chat session endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/chat/{slug}/session", include_in_schema=False)
+async def create_chat_session(slug: str, db: Session = Depends(get_db)):
+    """Create a new persistent chat session, proxying to RhodyRAG.
+
+    Returns {"session_id": "<uuid>"} which the browser stores in localStorage
+    and sends back on every subsequent stream request.
+    """
+    import httpx as _httpx
+    from config import API_URL, HEADERS
+
+    ws = db.get(orm_models.Workspace, slug)
+    if not ws:
+        raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
+
+    try:
+        async with _httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{API_URL}/workspace/{slug}/chat/session",
+                headers=HEADERS,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to create session: {exc}")
+
+
+@app.post("/api/chat/{slug}/{session_id}/stream", include_in_schema=False)
+async def stream_chat_session(slug: str, session_id: str, body: ChatSessionRequest, db: Session = Depends(get_db)):
+    """Stream a response in a persistent chat session.
+
+    Sends the conversation history to RhodyRAG so the ChatEngine can be
+    re-seeded after a server restart (last 6 turns are used).
+    """
+    ws = db.get(orm_models.Workspace, slug)
+    if not ws:
+        raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
+    history = [m.model_dump() for m in (body.history or [])]
+    return StreamingResponse(
+        anythingllm.stream_chat_session(
+            slug=slug,
+            session_id=session_id,
+            message=body.message,
+            history=history,
             followup_suffix=body.followup_suffix,
         ),
         media_type="text/event-stream",
