@@ -34,12 +34,14 @@ body {
     border-bottom: 3px solid var(--uri-gold);
     box-shadow: 0 2px 8px rgba(0,33,71,0.22);
     flex-shrink: 0;
+    width: 100%;
 }
 
 .page-header-inner {
     max-width: none;
+    width: 100%;
     margin: 0;
-    padding: 14px 24px;
+    padding: 14px 32px;
     display: flex;
     align-items: center;
     justify-content: space-between;
