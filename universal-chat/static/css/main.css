@@ -37,13 +37,21 @@ body {
 }
 
 .page-header-inner {
-    max-width: 1160px;
-    margin: 0 auto;
+    max-width: none;
+    margin: 0;
     padding: 14px 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
+}
+
+.page-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1; /* pushes .header-actions to the far right */
+    min-width: 0;
 }
 
 .page-header-left h1 {
@@ -149,16 +157,16 @@ body {
     flex: 1;
 }
 
-/* Sidebar toggle (collapse/expand) button */
+/* Sidebar toggle (collapse/expand) button — base */
 .btn-sidebar-toggle {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--gray-mid);
-    width: 26px;
-    height: 26px;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.3);
+    color: rgba(255,255,255,0.75);
+    width: 30px;
+    height: 30px;
     border-radius: 4px;
     cursor: pointer;
     flex-shrink: 0;
@@ -168,9 +176,9 @@ body {
 }
 
 .btn-sidebar-toggle:hover {
-    background: var(--border);
-    color: var(--uri-blue);
-    border-color: var(--uri-blue-mid);
+    border-color: var(--uri-gold);
+    color: var(--uri-gold);
+    background: rgba(208,166,39,0.1);
 }
 
 .btn-new-chat {
