@@ -22,7 +22,8 @@ body {
     background-color: var(--bg);
     color: var(--uri-blue);
     line-height: 1.5;
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
 }
@@ -98,7 +99,7 @@ body {
     flex-direction: row;
     align-items: stretch;
     overflow: hidden;
-    height: calc(100vh - 62px); /* subtract header height */
+    min-height: 0; /* critical: allows flex child to shrink below content size */
 }
 
 /* ========== Sessions Sidebar ========== */
@@ -110,6 +111,18 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: width 0.2s ease;
+}
+
+/* Collapsed sidebar — icon-only strip */
+.sessions-sidebar.collapsed {
+    width: 44px;
+}
+
+.sessions-sidebar.collapsed .sessions-sidebar-title,
+.sessions-sidebar.collapsed .btn-new-chat,
+.sessions-sidebar.collapsed .session-list {
+    display: none;
 }
 
 .sessions-sidebar-header {
@@ -122,12 +135,42 @@ body {
     gap: 8px;
 }
 
+.sessions-sidebar.collapsed .sessions-sidebar-header {
+    justify-content: center;
+    padding: 12px 0;
+}
+
 .sessions-sidebar-title {
     font-size: 11px;
     font-weight: 700;
     color: var(--uri-blue);
     text-transform: uppercase;
     letter-spacing: 0.6px;
+    flex: 1;
+}
+
+/* Sidebar toggle (collapse/expand) button */
+.btn-sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--gray-mid);
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    padding: 0;
+    line-height: 0;
+}
+
+.btn-sidebar-toggle:hover {
+    background: var(--border);
+    color: var(--uri-blue);
+    border-color: var(--uri-blue-mid);
 }
 
 .btn-new-chat {
@@ -244,14 +287,16 @@ body {
     background: var(--panel);
     border: 1px solid var(--border);
     border-left: none;
+    border-top: none;
+    border-bottom: none;
     border-radius: 0;
     box-shadow: none;
     flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0; /* prevent flex overflow */
-    height: 100%;
     min-height: 0;
+    overflow: hidden;
 }
 
 /* ========== Panel Header ========== */
@@ -1200,33 +1245,65 @@ details.citations[open] .citations-chevron {
     flex-shrink: 0;
 }
 
-/* ========== Embed Snippet Section ========== */
+/* ========== Embed Snippet Section (collapsible disclosure) ========== */
 .embed-snippet-section {
-    background: var(--panel);
+    flex-shrink: 0;
     border-top: 1px solid var(--border);
-    padding: 20px 24px 28px;
+    background: var(--panel);
+}
+
+/* The <summary> toggle bar */
+.embed-snippet-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--gray-mid);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none; /* remove native triangle */
+    transition: color 0.12s, background 0.12s;
+}
+
+.embed-snippet-summary::-webkit-details-marker { display: none; }
+
+.embed-snippet-summary:hover {
+    color: var(--uri-blue);
+    background: var(--gray-light);
+}
+
+.embed-chevron {
+    transition: transform 0.2s;
     flex-shrink: 0;
 }
 
+details.embed-snippet-section[open] .embed-chevron {
+    transform: rotate(180deg);
+}
+
 .embed-snippet-inner {
-    max-width: 1160px;
-    margin: 0 auto;
+    padding: 12px 16px 16px;
 }
 
 .embed-snippet-label {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.4px;
     color: var(--gray-mid);
-    margin-bottom: 10px;
+    margin-bottom: 8px;
+    display: none; /* summary already acts as the label */
 }
 
 .embed-snippet-code-wrap {
     position: relative;
     display: flex;
     align-items: flex-start;
-    gap: 10px;
+    gap: 8px;
 }
 
 .embed-snippet-code {
@@ -1234,15 +1311,14 @@ details.citations[open] .citations-chevron {
     background: var(--uri-blue);
     color: #e8f0f7;
     border: 1px solid var(--uri-blue-mid);
-    border-radius: 6px;
-    padding: 12px 16px;
+    border-radius: 5px;
+    padding: 10px 14px;
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-    font-size: 12px;
+    font-size: 11px;
     line-height: 1.6;
     white-space: pre;
     overflow-x: auto;
     margin: 0;
-    /* subtle gold left accent */
     border-left: 3px solid var(--uri-gold);
 }
 
@@ -1252,10 +1328,10 @@ details.citations[open] .citations-chevron {
     border: none;
     color: var(--uri-blue);
     font-family: inherit;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
-    padding: 8px 16px;
-    border-radius: 5px;
+    padding: 6px 12px;
+    border-radius: 4px;
     cursor: pointer;
     letter-spacing: 0.3px;
     transition: background 0.15s, color 0.15s;
@@ -1272,8 +1348,8 @@ details.citations[open] .citations-chevron {
 }
 
 .embed-snippet-hint {
-    margin-top: 10px;
-    font-size: 12px;
+    margin-top: 8px;
+    font-size: 11px;
     color: var(--gray-mid);
     line-height: 1.6;
 }
@@ -1282,9 +1358,9 @@ details.citations[open] .citations-chevron {
     background: var(--gray-light);
     border: 1px solid var(--border);
     border-radius: 3px;
-    padding: 1px 5px;
+    padding: 1px 4px;
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-    font-size: 11px;
+    font-size: 10px;
     color: var(--uri-blue);
 }
 
