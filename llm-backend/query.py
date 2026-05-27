@@ -7,6 +7,12 @@ threshold, and answer.
 
 The embed model is read from the workspace row, falling back to the global
 settings row if the workspace has no embed_model set.
+
+Chat sessions use LlamaIndex's CondensePlusContext ChatEngine, which keeps
+rolling conversation memory and condenses follow-up questions into standalone
+retrieval queries. Sessions are held in an in-process dict keyed by session_id
+(UUID). History is re-seeded from the browser's localStorage payload on the
+first message after a server restart (last 6 turns).
 """
 
 import asyncio
@@ -14,6 +20,7 @@ import json
 from typing import AsyncGenerator
 
 from llama_index.core import VectorStoreIndex
+from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.llms.litellm import LiteLLM
 from llama_index.vector_stores.lancedb.base import TableNotFoundError
@@ -21,6 +28,13 @@ from llama_index.vector_stores.lancedb.base import TableNotFoundError
 import config
 import db
 from embedding import build_embed_model, get_vector_store
+
+# ---------------------------------------------------------------------------
+# In-process chat session registry
+# Maps session_id (str UUID) → CondensePlusContextChatEngine instance.
+# Lost on server restart; re-seeded from browser history on first message.
+# ---------------------------------------------------------------------------
+_chat_sessions: dict = {}
 
 
 # Gateway model strings are not in LiteLLM's registry, so it falls back to a
@@ -70,6 +84,115 @@ def _build_index(workspace: dict) -> VectorStoreIndex:
             embed_api_key=workspace["embed_api_key"],
         ),
     )
+
+
+def build_chat_engine(workspace: dict, chat_history: list[dict] | None = None):
+    """Build a CondensePlusContext ChatEngine for a workspace.
+
+    `chat_history` is a list of {"role": "user"|"assistant", "content": str}
+    dicts from the browser's localStorage. The last 6 entries are pre-loaded
+    into ChatMemoryBuffer so the LLM has context after a server restart.
+    """
+    from llama_index.core.base.llms.types import ChatMessage, MessageRole as MR
+
+    try:
+        index = _build_index(workspace)
+    except TableNotFoundError:
+        return None
+
+    memory = ChatMemoryBuffer.from_defaults(token_limit=4096)
+
+    # Re-seed from browser history (last 6 turns max)
+    if chat_history:
+        for msg in chat_history[-6:]:
+            role = MR.USER if msg.get("role") == "user" else MR.ASSISTANT
+            content = msg.get("content", "")
+            if content:
+                memory.put(ChatMessage(role=role, content=content))
+
+    llm = build_llm(
+        workspace["llm_model"],
+        workspace["api_key"],
+        workspace["temperature"],
+        workspace["system_prompt"],
+        workspace.get("max_tokens", 1024),
+    )
+
+    return index.as_chat_engine(
+        chat_mode="condense_plus_context",
+        memory=memory,
+        llm=llm,
+        similarity_top_k=workspace["top_n"],
+        node_postprocessors=[
+            SimilarityPostprocessor(
+                similarity_cutoff=workspace["similarity_threshold"]
+            )
+        ],
+        verbose=False,
+    )
+
+
+async def stream_chat_session(
+    session_id: str,
+    workspace: dict,
+    message: str,
+    history: list[dict] | None = None,
+) -> AsyncGenerator[str, None]:
+    """Stream a chat response using a persistent ChatEngine session.
+
+    If the session_id is not in the in-process registry (e.g. after a server
+    restart), the engine is rebuilt and seeded from `history` (last 6 turns)
+    before processing the new message.
+
+    Yields SSE events in the same format as stream_query_workspace:
+      event: token  / data: <text delta>
+      event: sources / data: <json array>
+      event: done   / data: [DONE]
+      event: error  / data: <message>
+    """
+    try:
+        if session_id not in _chat_sessions:
+            engine = await asyncio.to_thread(build_chat_engine, workspace, history or [])
+            if engine is None:
+                yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
+                yield "event: sources\ndata: []\n\n"
+                yield "event: done\ndata: [DONE]\n\n"
+                return
+            _chat_sessions[session_id] = engine
+
+        engine = _chat_sessions[session_id]
+
+        try:
+            streaming_response = await engine.astream_chat(message)
+        except Exception as exc:
+            error_msg = str(exc).replace('\n', ' ')
+            yield f"event: error\ndata: {error_msg}\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+            return
+
+        # Stream tokens
+        async for token in streaming_response.async_response_gen():
+            if token:
+                safe = token.replace('\n', '\\n')
+                yield f"event: token\ndata: {safe}\n\n"
+
+        # Emit sources from the response
+        source_nodes = getattr(streaming_response, "source_nodes", None) or []
+        sources = [
+            {
+                "score": node.score,
+                "filename": node.node.metadata.get("filename"),
+                "text": node.node.get_content()[:200],
+            }
+            for node in source_nodes
+        ]
+        yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
+        yield "event: done\ndata: [DONE]\n\n"
+
+    except Exception as exc:
+        error_msg = str(exc).replace('\n', ' ')
+        yield f"event: error\ndata: {error_msg}\n\n"
+        yield "event: done\ndata: [DONE]\n\n"
 
 
 def query_workspace(workspace: dict, question: str) -> dict:

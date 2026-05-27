@@ -293,6 +293,65 @@ async def stream_query_workspace(slug: str, body: QueryRequest):
     )
 
 
+# --- Chat sessions (persistent, context-aware) --------------------------------
+
+import uuid as _uuid
+
+
+class ChatMessageRecord(BaseModel):
+    role: str
+    content: str
+
+
+class ChatSessionStreamRequest(BaseModel):
+    message: str
+    history: Optional[List[ChatMessageRecord]] = Field(
+        default_factory=list,
+        description="Recent conversation turns from the browser (last 6 used to re-seed context after server restart).",
+    )
+
+
+@app.post("/workspace/{slug}/chat/session", summary="Create a new chat session")
+async def create_chat_session(slug: str):
+    """Returns a fresh session_id UUID. The client stores this and sends it
+    back on subsequent /chat/{session_id}/stream requests."""
+    ws = db.get_workspace(slug)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return {"session_id": str(_uuid.uuid4())}
+
+
+@app.post("/workspace/{slug}/chat/{session_id}/stream", summary="Stream a chat response within a session")
+async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStreamRequest):
+    """Send a message in an existing chat session and stream the response.
+
+    The `history` field contains the last N conversation turns from the
+    browser's localStorage. This is used to re-seed the LlamaIndex ChatEngine
+    if the session is not in the in-process registry (e.g. after a server
+    restart), ensuring follow-up questions always have context.
+    """
+    ws = db.get_workspace(slug)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    history = [m.model_dump() for m in (body.history or [])]
+    return StreamingResponse(
+        query.stream_chat_session(session_id, ws, body.message, history=history),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.delete("/workspace/{slug}/chat/{session_id}", status_code=204, summary="Delete a chat session")
+async def delete_chat_session(slug: str, session_id: str):
+    """Remove the chat session from the in-process registry. The browser
+    should also remove it from localStorage."""
+    query._chat_sessions.pop(session_id, None)
+    return None
+
+
 # --- Doc tracking (flat-file store, auth-protected) --------------------------
 
 class DocRecord(BaseModel):
