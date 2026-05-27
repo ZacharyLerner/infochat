@@ -1015,6 +1015,14 @@ details.citations[open] .citations-chevron {
 }
 
 /* ========== Settings Page — wider panel ========== */
+.settings-page-body {
+    overflow-y: auto;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 24px;
+    box-sizing: border-box;
+}
+
 .settings-page-body .settings-panel {
     max-width: 860px;
 }
