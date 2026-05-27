@@ -245,12 +245,19 @@ async def embed_file(slug: str, file: UploadFile = File(..., description="File t
             "doc_id": doc_id, "chunks_embedded": chunks}
 
 
-@app.delete("/workspace/{slug}/embed/{doc_id}", summary="Delete an embedded file")
-def delete_embed(slug: str, doc_id: str = None):
+@app.delete("/workspace/{slug}/embed/{doc_id:path}", summary="Delete an embedded file")
+def delete_embed(slug: str, doc_id: str):
     if db.get_workspace(slug) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     deleted = embedding.delete_workspace_file(slug, doc_id)
+
+    if deleted == 0:
+        # Check if the doc was tracked in docs.json even if no vectors were found
+        data = _read_docs()
+        tracked = any(d.get("doc_id") == doc_id for d in data.get(slug, []))
+        if not tracked:
+            raise HTTPException(status_code=404, detail="Document not found")
 
     # Keep docs.json in sync
     data = _read_docs()
