@@ -8,11 +8,12 @@ threshold, and answer.
 The embed model is read from the workspace row, falling back to the global
 settings row if the workspace has no embed_model set.
 
-Chat sessions use LlamaIndex's CondensePlusContext ChatEngine, which keeps
-rolling conversation memory and condenses follow-up questions into standalone
-retrieval queries. Sessions are held in an in-process dict keyed by session_id
-(UUID). History is re-seeded from the browser's localStorage payload on the
-first message after a server restart (last 6 turns).
+Chat sessions maintain a ChatMemoryBuffer per session_id (UUID) for rolling
+conversation context. Each message retrieves fresh context nodes then streams
+tokens directly via llm.astream_chat() — bypassing LlamaIndex's ChatEngine
+astream_chat() which buffers the full response before yielding. History is
+re-seeded from the browser's localStorage payload on the first message after
+a server restart (last 6 turns).
 """
 
 import asyncio
@@ -31,7 +32,7 @@ from embedding import build_embed_model, get_vector_store
 
 # ---------------------------------------------------------------------------
 # In-process chat session registry
-# Maps session_id (str UUID) → CondensePlusContextChatEngine instance.
+# Maps session_id (str UUID) → {"index": VectorStoreIndex, "memory": ChatMemoryBuffer, "workspace": dict}
 # Lost on server restart; re-seeded from browser history on first message.
 # ---------------------------------------------------------------------------
 _chat_sessions: dict = {}
@@ -86,8 +87,11 @@ def _build_index(workspace: dict) -> VectorStoreIndex:
     )
 
 
-def build_chat_engine(workspace: dict, chat_history: list[dict] | None = None):
-    """Build a CondensePlusContext ChatEngine for a workspace.
+def _build_session_state(workspace: dict, chat_history: list[dict] | None = None) -> dict | None:
+    """Build and return the session state dict for a chat session.
+
+    Returns a dict with keys: index, memory, workspace
+    Returns None if no documents have been embedded yet.
 
     `chat_history` is a list of {"role": "user"|"assistant", "content": str}
     dicts from the browser's localStorage. The last 6 entries are pre-loaded
@@ -110,26 +114,7 @@ def build_chat_engine(workspace: dict, chat_history: list[dict] | None = None):
             if content:
                 memory.put(ChatMessage(role=role, content=content))
 
-    llm = build_llm(
-        workspace["llm_model"],
-        workspace["api_key"],
-        workspace["temperature"],
-        workspace["system_prompt"],
-        workspace.get("max_tokens", 1024),
-    )
-
-    return index.as_chat_engine(
-        chat_mode="condense_plus_context",
-        memory=memory,
-        llm=llm,
-        similarity_top_k=workspace["top_n"],
-        node_postprocessors=[
-            SimilarityPostprocessor(
-                similarity_cutoff=workspace["similarity_threshold"]
-            )
-        ],
-        verbose=False,
-    )
+    return {"index": index, "memory": memory, "workspace": workspace}
 
 
 async def stream_chat_session(
@@ -138,54 +123,116 @@ async def stream_chat_session(
     message: str,
     history: list[dict] | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream a chat response using a persistent ChatEngine session.
+    """Stream a persistent chat session response with true token-by-token streaming.
 
-    If the session_id is not in the in-process registry (e.g. after a server
-    restart), the engine is rebuilt and seeded from `history` (last 6 turns)
-    before processing the new message.
+    Avoids LlamaIndex's ChatEngine.astream_chat() which buffers the full
+    response before yielding (due to its internal queue/task architecture).
 
-    Yields SSE events in the same format as stream_query_workspace:
-      event: token  / data: <text delta>
-      event: sources / data: <json array>
-      event: done   / data: [DONE]
-      event: error  / data: <message>
+    Instead, replicates what stream_query_workspace does — retrieves context
+    nodes, builds the prompt manually, and calls llm.astream_chat() directly —
+    while maintaining a ChatMemoryBuffer per session so follow-up questions
+    have full conversation context.
+
+    Flow per message:
+      1. Get or build the session state (index + memory).
+      2. Retrieve relevant nodes using the raw message as the retrieval query.
+         (For a richer experience, the system prompt already captures context.)
+      3. Build a messages list: prior history from memory + system prompt +
+         context-augmented user message.
+      4. Stream tokens directly from llm.astream_chat() — no buffering.
+      5. After streaming, append user+assistant messages to memory so the
+         next turn has full context.
     """
+    from llama_index.core.base.llms.types import ChatMessage, MessageRole
+
     try:
+        # ── 1. Get or build session state ────────────────────────────────────
         if session_id not in _chat_sessions:
-            engine = await asyncio.to_thread(build_chat_engine, workspace, history or [])
-            if engine is None:
+            state = await asyncio.to_thread(_build_session_state, workspace, history or [])
+            if state is None:
                 yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
                 yield "event: sources\ndata: []\n\n"
                 yield "event: done\ndata: [DONE]\n\n"
                 return
-            _chat_sessions[session_id] = engine
+            _chat_sessions[session_id] = state
 
-        engine = _chat_sessions[session_id]
+        state = _chat_sessions[session_id]
+        index = state["index"]
+        memory = state["memory"]
 
-        try:
-            streaming_response = await engine.astream_chat(message)
-        except Exception as exc:
-            error_msg = str(exc).replace('\n', ' ')
-            yield f"event: error\ndata: {error_msg}\n\n"
-            yield "event: done\ndata: [DONE]\n\n"
-            return
+        # ── 2. Retrieve relevant context nodes ───────────────────────────────
+        threshold = workspace["similarity_threshold"]
+        retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
+        nodes = await retriever.aretrieve(message)
+        nodes = [n for n in nodes if n.score is None or n.score >= threshold]
 
-        # Stream tokens
-        async for token in streaming_response.async_response_gen():
-            if token:
-                safe = token.replace('\n', '\\n')
-                yield f"event: token\ndata: {safe}\n\n"
-
-        # Emit sources from the response
-        source_nodes = getattr(streaming_response, "source_nodes", None) or []
         sources = [
             {
                 "score": node.score,
                 "filename": node.node.metadata.get("filename"),
                 "text": node.node.get_content()[:200],
             }
-            for node in source_nodes
+            for node in nodes
         ]
+
+        # ── 3. Build the messages list ───────────────────────────────────────
+        system_prompt = workspace.get("system_prompt") or ""
+
+        # Prior turns from memory (excludes the current message)
+        prior_messages = memory.get()
+
+        # Context-augmented user prompt — same format as stream_query_workspace
+        if nodes:
+            context_str = "\n\n".join(n.node.get_content() for n in nodes)
+            user_content = (
+                f"Context information is below.\n"
+                f"---------------------\n"
+                f"{context_str}\n"
+                f"---------------------\n"
+                f"Given the context information and the conversation history, answer the query.\n"
+                f"Query: {message}\n"
+                f"Answer: "
+            )
+        else:
+            # No matching context — answer from conversation history alone
+            user_content = message
+
+        messages: list[ChatMessage] = []
+        if system_prompt:
+            messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
+        messages.extend(prior_messages)
+        messages.append(ChatMessage(role=MessageRole.USER, content=user_content))
+
+        # ── 4. Stream directly from the LLM ─────────────────────────────────
+        llm = build_llm(
+            workspace["llm_model"],
+            workspace["api_key"],
+            workspace["temperature"],
+            workspace["system_prompt"],
+            workspace.get("max_tokens", 1024),
+        )
+
+        full_response = ""
+        try:
+            response_gen = await llm.astream_chat(messages)
+            async for chat_response in response_gen:
+                token = chat_response.delta
+                if token:
+                    full_response += token
+                    safe = token.replace('\n', '\\n')
+                    yield f"event: token\ndata: {safe}\n\n"
+        except Exception as exc:
+            error_msg = str(exc).replace('\n', ' ')
+            yield f"event: error\ndata: {error_msg}\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+            return
+
+        # ── 5. Update memory with this turn ─────────────────────────────────
+        # Store the raw user message (not the context-augmented one) so the
+        # conversation history reads naturally in subsequent turns.
+        memory.put(ChatMessage(role=MessageRole.USER, content=message))
+        memory.put(ChatMessage(role=MessageRole.ASSISTANT, content=full_response.strip()))
+
         yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
 
