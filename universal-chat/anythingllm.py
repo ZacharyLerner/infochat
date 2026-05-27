@@ -1,10 +1,10 @@
 import json
 import httpx
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from config import API_URL, HEADERS
 
 
-def _translate_sse_lines(event_type: str | None, raw: str) -> str | None:
+def _translate_sse_lines(event_type: Optional[str], raw: str) -> Optional[str]:
     """Translate a single RhodyRAG SSE data line into the frontend's JSON format.
 
     RhodyRAG emits:  event: token|sources|done  /  data: <payload>
@@ -77,7 +77,7 @@ async def stream_chat_session(
     slug: str,
     session_id: str,
     message: str,
-    history: list[dict] | None = None,
+    history: Optional[list] = None,
     followup_suffix: str = "",
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response using a persistent ChatEngine session on RhodyRAG.
