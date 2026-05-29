@@ -309,6 +309,16 @@ class ChatSessionStreamRequest(BaseModel):
         default_factory=list,
         description="Recent conversation turns from the browser (last 6 used to re-seed context after server restart).",
     )
+    retrieval_query: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional short query used *only* for vector similarity retrieval. "
+            "When omitted, `message` is used for retrieval. "
+            "Use this to pass a concise retrieval query (e.g. document summary + question) "
+            "while keeping large document context in `message` for the LLM only — "
+            "preventing oversized embeddings from exceeding the embedding model's context window."
+        ),
+    )
 
 
 @app.post("/workspace/{slug}/chat/session", summary="Create a new chat session")
@@ -335,7 +345,11 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
         raise HTTPException(status_code=404, detail="Workspace not found")
     history = [m.model_dump() for m in (body.history or [])]
     return StreamingResponse(
-        query.stream_chat_session(session_id, ws, body.message, history=history),
+        query.stream_chat_session(
+            session_id, ws, body.message,
+            history=history,
+            retrieval_query=body.retrieval_query,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

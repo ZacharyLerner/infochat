@@ -122,6 +122,7 @@ async def stream_chat_session(
     workspace: dict,
     message: str,
     history: list[dict] | None = None,
+    retrieval_query: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream a persistent chat session response with true token-by-token streaming.
 
@@ -133,10 +134,16 @@ async def stream_chat_session(
     while maintaining a ChatMemoryBuffer per session so follow-up questions
     have full conversation context.
 
+    Args:
+        retrieval_query: Optional short text used *only* for vector similarity
+            retrieval. When provided (e.g. document summary + user question),
+            this is embedded instead of `message`, preventing large document
+            context blocks from overflowing the embedding model's 2048-token
+            context window. `message` is still used verbatim for the LLM prompt.
+
     Flow per message:
       1. Get or build the session state (index + memory).
-      2. Retrieve relevant nodes using the raw message as the retrieval query.
-         (For a richer experience, the system prompt already captures context.)
+      2. Retrieve relevant nodes using retrieval_query (or message if not set).
       3. Build a messages list: prior history from memory + system prompt +
          context-augmented user message.
       4. Stream tokens directly from llm.astream_chat() — no buffering.
@@ -144,6 +151,13 @@ async def stream_chat_session(
          next turn has full context.
     """
     from llama_index.core.base.llms.types import ChatMessage, MessageRole
+
+    # The query sent to the embedding model for retrieval must be short enough
+    # to fit within the embedding model's context window (2048 tokens).
+    # When a large document is attached, the caller passes a concise
+    # retrieval_query (summary + question) while the full document context
+    # lives only in `message` for the LLM.
+    embed_query = retrieval_query if retrieval_query else message
 
     try:
         # ── 1. Get or build session state ────────────────────────────────────
@@ -161,9 +175,10 @@ async def stream_chat_session(
         memory = state["memory"]
 
         # ── 2. Retrieve relevant context nodes ───────────────────────────────
+        # Use embed_query (short) for retrieval — never the full LLM message.
         threshold = workspace["similarity_threshold"]
         retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
-        nodes = await retriever.aretrieve(message)
+        nodes = await retriever.aretrieve(embed_query)
         nodes = [n for n in nodes if n.score is None or n.score >= threshold]
 
         sources = [
