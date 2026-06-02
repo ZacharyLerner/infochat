@@ -71,8 +71,25 @@
       <!-- Default Question Chips -->
       <div id="default-questions-bar"></div>
 
+      <!-- File Attachments (shown above input bar when a file is attached) -->
+      <div id="file-attachments"></div>
+
       <!-- Input -->
       <div id="input-bar">
+        <!-- Hidden file input -->
+        <input
+          type="file"
+          id="file-input"
+          accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tiff,.tif,.docx,.pptx,.xlsx,.txt,.md,.csv"
+          style="display:none"
+          onchange="handleFileSelect(this)"
+        />
+        <!-- Paperclip / attach button -->
+        <button id="upload-btn" title="Attach a file" type="button" onclick="document.getElementById('file-input').click()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
         <textarea id="message-input" placeholder="Type a message..." rows="1" autocomplete="off"></textarea>
         <button id="send-btn" onclick="sendMessage()">Send</button>
       </div>

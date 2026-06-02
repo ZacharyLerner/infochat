@@ -1382,6 +1382,162 @@ details.embed-snippet-section[open] .embed-chevron {
     color: var(--uri-blue);
 }
 
+/* ========== File Attachments Area ========== */
+#file-attachments {
+    display: none; /* shown via JS when a file is attached */
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 14px 4px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+}
+
+/* ========== File Chip ========== */
+.file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 280px;
+    padding: 5px 8px 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: var(--gray-light);
+    font-size: 12px;
+    color: var(--uri-blue);
+    font-family: inherit;
+    line-height: 1;
+}
+
+.file-chip-icon {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: var(--uri-blue-light);
+}
+
+.file-chip-name {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 500;
+}
+
+.file-chip-status {
+    font-size: 11px;
+    color: var(--gray-mid);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.file-chip-remove {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--gray-mid);
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.12s, color 0.12s;
+    line-height: 0;
+}
+
+.file-chip-remove:hover {
+    background: rgba(185, 28, 28, 0.1);
+    color: var(--error);
+}
+
+/* Loading state */
+.file-chip.loading {
+    border-color: var(--uri-blue-light);
+    background: #eef4fb;
+    color: var(--uri-blue-mid);
+}
+
+/* Spinner for loading state */
+.file-chip-spinner {
+    flex-shrink: 0;
+    display: inline-block;
+    width: 13px;
+    height: 13px;
+    border: 2px solid rgba(34, 119, 179, 0.25);
+    border-top-color: var(--uri-blue-light);
+    border-radius: 50%;
+    animation: file-spin 0.7s linear infinite;
+}
+
+@keyframes file-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Error state */
+.file-chip.error {
+    border-color: #fecaca;
+    background: #fef2f2;
+    color: var(--error);
+}
+
+.file-chip.error .file-chip-status {
+    color: var(--error);
+    font-weight: 500;
+}
+
+/* ========== Upload button (paperclip) ========== */
+#upload-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    min-height: 48px;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--border);
+    color: var(--gray-mid);
+    cursor: pointer;
+    padding: 0;
+    transition: color 0.15s, background 0.15s;
+    line-height: 0;
+}
+
+#upload-btn:hover {
+    color: var(--uri-blue-light);
+    background: var(--gray-light);
+}
+
+/* ========== User message file badge ========== */
+.user-file-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 220px;
+    padding: 2px 8px 2px 6px;
+    margin-bottom: 5px;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1;
+}
+
+.message.user .user-file-badge {
+    display: flex;
+    margin-bottom: 6px;
+}
+
 /* ========== Unsaved Changes Modal ========== */
 .modal-backdrop {
     display: none;

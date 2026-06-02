@@ -1,16 +1,35 @@
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import os
+import tempfile
+import logging
+import time
 
 import anythingllm
 from models import ChatRequest, ChatSessionRequest
 from db import engine, get_db
 import orm_models
 from schemas import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
+from config import LLM_GW_URL, LLM_GW_KEY
+import file_processor
+
+# ---------------------------------------------------------------------------
+# Logging configuration
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# Quieten noisy third-party loggers to WARNING so our DEBUG output is readable
+for _noisy in ("httpx", "httpcore", "uvicorn.access", "sqlalchemy.engine"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 # Create tables on startup
 orm_models.Base.metadata.create_all(bind=engine)
@@ -30,6 +49,39 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+
+# ---------------------------------------------------------------------------
+# Request timing middleware — logs every API call and its duration
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    logger.debug("→ %s %s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        elapsed = (time.perf_counter() - start) * 1000
+        logger.error("✗ %s %s — unhandled exception after %.1fms: %s",
+                     request.method, request.url.path, elapsed, exc, exc_info=True)
+        raise
+    elapsed = (time.perf_counter() - start) * 1000
+    level = logging.WARNING if response.status_code >= 400 else logging.DEBUG
+    logger.log(level, "← %s %s %d (%.1fms)",
+               request.method, request.url.path, response.status_code, elapsed)
+    return response
+
+
+@app.on_event("startup")
+async def _startup():
+    logger.info("=" * 60)
+    logger.info("Universal Chat API starting up")
+    logger.info("  LLM_GW_URL : %s", LLM_GW_URL)
+    logger.info("  LLM_GW_KEY : %s", "SET" if LLM_GW_KEY else "NOT SET (file upload disabled)")
+    from config import API_URL
+    logger.info("  RAG_API_URL: %s", API_URL)
+    logger.info("=" * 60)
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +108,7 @@ async def embed_script():
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request, slug: str = ""):
-    return templates.TemplateResponse("settings.html", {"request": request, "slug": slug})
+    return templates.TemplateResponse(request, "settings.html", {"slug": slug})
 
 
 @app.get("/{slug}", response_class=HTMLResponse, include_in_schema=False)
@@ -64,11 +116,12 @@ async def chat_page(request: Request, slug: str, db: Session = Depends(get_db)):
     ws = db.get(orm_models.Workspace, slug)
     if not ws:
         return templates.TemplateResponse(
+            request,
             "workspace_not_found.html",
-            {"request": request, "slug": slug},
+            {"slug": slug},
             status_code=404,
         )
-    return templates.TemplateResponse("home.html", {"request": request, "slug": slug, "name": ws.name or slug})
+    return templates.TemplateResponse(request, "home.html", {"slug": slug, "name": ws.name or slug})
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +161,10 @@ async def create_chat_session(slug: str, db: Session = Depends(get_db)):
 
     ws = db.get(orm_models.Workspace, slug)
     if not ws:
+        logger.warning("create_chat_session: workspace '%s' not found", slug)
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
 
+    logger.debug("create_chat_session: slug=%s → POST %s/workspace/%s/chat/session", slug, API_URL, slug)
     try:
         async with _httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -117,8 +172,11 @@ async def create_chat_session(slug: str, db: Session = Depends(get_db)):
                 headers=HEADERS,
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            logger.debug("create_chat_session: got session_id=%s", data.get("session_id"))
+            return data
     except Exception as exc:
+        logger.error("create_chat_session: failed for slug=%s: %s", slug, exc, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Failed to create session: {exc}")
 
 
@@ -131,8 +189,19 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionReque
     """
     ws = db.get(orm_models.Workspace, slug)
     if not ws:
+        logger.warning("stream_chat_session: workspace '%s' not found", slug)
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
+
     history = [m.model_dump() for m in (body.history or [])]
+    has_file = body.file_context is not None
+    logger.debug(
+        "stream_chat_session: slug=%s session=%s message_len=%d history_turns=%d "
+        "followup=%s file_attached=%s%s",
+        slug, session_id, len(body.message), len(history),
+        bool(body.followup_suffix), has_file,
+        f" file='{body.file_context.filename}'" if has_file else "",
+    )
+
     return StreamingResponse(
         anythingllm.stream_chat_session(
             slug=slug,
@@ -140,9 +209,82 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionReque
             message=body.message,
             history=history,
             followup_suffix=body.followup_suffix,
+            file_context=body.file_context.model_dump() if body.file_context else None,
         ),
         media_type="text/event-stream",
     )
+
+
+# ---------------------------------------------------------------------------
+# File upload — process a document or image into Markdown + summary
+# ---------------------------------------------------------------------------
+
+@app.post("/api/upload/{slug}", include_in_schema=False)
+async def upload_file(slug: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Accept a file upload, run the two-stage processing pipeline, and return
+    the resulting Markdown and one-sentence summary.
+
+    The processed content is returned to the browser and stored client-side;
+    nothing is persisted on the server after the request completes.
+    """
+    ws = db.get(orm_models.Workspace, slug)
+    if not ws:
+        logger.warning("upload_file: workspace '%s' not found", slug)
+        raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
+
+    if not LLM_GW_KEY:
+        logger.error("upload_file: LLM_GW_KEY not set — file upload disabled")
+        raise HTTPException(
+            status_code=503,
+            detail="File upload is not configured. Set LLM_GW_KEY in your .env file.",
+        )
+
+    original_name = file.filename or "upload"
+    _, ext = os.path.splitext(original_name)
+    logger.info("upload_file: received '%s' (content_type=%s) for workspace '%s'",
+                original_name, file.content_type, slug)
+
+    tmp_path: str | None = None
+    t_start = time.perf_counter()
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp_path = tmp.name
+            content = await file.read()
+            tmp.write(content)
+        file_size_kb = len(content) / 1024
+        logger.debug("upload_file: saved to tmp=%s (%.1f KB)", tmp_path, file_size_kb)
+
+        result = file_processor.process_upload(
+            tmp_path=tmp_path,
+            original_filename=original_name,
+            gw_url=LLM_GW_URL,
+            api_key=LLM_GW_KEY,
+        )
+
+        elapsed = (time.perf_counter() - t_start) * 1000
+        md_chars = len(result.get("markdown", ""))
+        summary_chars = len(result.get("summary", ""))
+        logger.info(
+            "upload_file: completed '%s' in %.0fms — markdown=%d chars, summary=%d chars",
+            original_name, elapsed, md_chars, summary_chars,
+        )
+        logger.debug("upload_file: summary text: %s", result.get("summary", ""))
+        return JSONResponse(result)
+
+    except ValueError as exc:
+        logger.error("upload_file: configuration error for '%s': %s", original_name, exc)
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        elapsed = (time.perf_counter() - t_start) * 1000
+        logger.exception(
+            "upload_file: processing failed for '%s' after %.0fms: %s",
+            original_name, elapsed, exc,
+        )
+        raise HTTPException(status_code=500, detail=f"File processing failed: {exc}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+            logger.debug("upload_file: deleted tmp file %s", tmp_path)
 
 
 # ---------------------------------------------------------------------------

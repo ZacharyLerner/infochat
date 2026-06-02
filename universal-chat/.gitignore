@@ -1,5 +1,5 @@
 .env
-test.htl
 *.db
 
 /venv
+__pycache__

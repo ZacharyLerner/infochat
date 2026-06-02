@@ -16,6 +16,40 @@
 // =============================================================================
 
 // ---------------------------------------------------------------------------
+// Debug logger — prefixes all output with [RhodyRAG] for easy filtering
+// ---------------------------------------------------------------------------
+const _log = {
+  _tag: "%c[RhodyRAG]%c",
+  _tagStyle: "color:#2277b3;font-weight:700",
+  _reset: "color:inherit;font-weight:normal",
+
+  debug(...args) {
+    console.debug(this._tag, this._tagStyle, this._reset, ...args);
+  },
+  info(...args) {
+    console.info(this._tag, this._tagStyle, this._reset, ...args);
+  },
+  warn(...args) {
+    console.warn(this._tag, this._tagStyle, this._reset, ...args);
+  },
+  error(...args) {
+    console.error(this._tag, this._tagStyle, this._reset, ...args);
+  },
+  group(label) {
+    console.groupCollapsed(`%c[RhodyRAG]%c ${label}`, this._tagStyle, this._reset);
+  },
+  groupEnd() {
+    console.groupEnd();
+  },
+  time(label) {
+    console.time(`[RhodyRAG] ${label}`);
+  },
+  timeEnd(label) {
+    console.timeEnd(`[RhodyRAG] ${label}`);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // DOM references
 // ---------------------------------------------------------------------------
 const chatWindow        = document.getElementById("chat-window");
@@ -50,15 +84,25 @@ function _storageKey() {
 function loadSessions() {
   try {
     const raw = localStorage.getItem(_storageKey());
-    if (raw) return JSON.parse(raw);
-  } catch (_) {}
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      _log.debug(`loadSessions: found ${parsed.length} session(s) for workspace '${WORKSPACE_SLUG}'`);
+      return parsed;
+    }
+  } catch (err) {
+    _log.warn("loadSessions: failed to parse localStorage:", err);
+  }
+  _log.debug(`loadSessions: no sessions found for workspace '${WORKSPACE_SLUG}'`);
   return [];
 }
 
 function saveSessions(sessions) {
   try {
     localStorage.setItem(_storageKey(), JSON.stringify(sessions));
-  } catch (_) {}
+    _log.debug(`saveSessions: saved ${sessions.length} session(s)`);
+  } catch (err) {
+    _log.error("saveSessions: failed to write to localStorage:", err);
+  }
 }
 
 function getSession(sessionId) {
@@ -199,12 +243,20 @@ function _confirmDeleteSession(sessionId) {
 // ---------------------------------------------------------------------------
 
 async function startNewChat() {
-  if (isBusy) return;
+  if (isBusy) {
+    _log.warn("startNewChat: blocked — isBusy=true");
+    return;
+  }
+
+  _log.info(`startNewChat: creating new session for workspace '${WORKSPACE_SLUG}'`);
+  _log.time("startNewChat");
 
   try {
     const res = await fetch(`/api/chat/${WORKSPACE_SLUG}/session`, { method: "POST" });
     if (!res.ok) throw new Error(`Server returned ${res.status}`);
     const { session_id } = await res.json();
+    _log.timeEnd("startNewChat");
+    _log.info(`startNewChat: session created — session_id=${session_id}`);
 
     const newSession = {
       session_id,
@@ -225,9 +277,12 @@ async function startNewChat() {
     renderSessionList();
     messageInput.focus();
   } catch (err) {
-    console.error("Failed to create new chat session:", err);
+    _log.timeEnd("startNewChat");
+    _log.error("startNewChat: failed to create session from server:", err);
+    _log.warn("startNewChat: falling back to client-only session");
     // Fallback: create a client-only session so the UI still works
     const session_id = generateUUID();
+    _log.debug(`startNewChat: fallback session_id=${session_id}`);
     const newSession = {
       session_id,
       title: "",
@@ -246,8 +301,12 @@ async function startNewChat() {
 
 function selectSession(sessionId) {
   const session = getSession(sessionId);
-  if (!session) return;
+  if (!session) {
+    _log.warn(`selectSession: session '${sessionId}' not found in localStorage`);
+    return;
+  }
 
+  _log.info(`selectSession: loading session '${sessionId}' — "${session.title || "New Chat"}" (${session.messages.length} messages)`);
   activeSessionId = sessionId;
   chatWindow.innerHTML = "";
   chatPanelTitle.textContent = session.title || "Chat";
@@ -264,7 +323,11 @@ function selectSession(sessionId) {
   // Render all stored messages
   for (const msg of session.messages) {
     if (msg.role === "user") {
-      appendMessage("user", escapeHtml(msg.content));
+      let userHtml = escapeHtml(msg.content);
+      if (msg.filename) {
+        userHtml = `<span class="user-file-badge">${_fileIcon(msg.filename)}<span>${escapeHtml(msg.filename)}</span></span>${userHtml}`;
+      }
+      appendMessage("user", userHtml);
     } else if (msg.role === "assistant") {
       const html = parseMarkdown(msg.content) + buildCitations(msg.sources || []);
       appendMessage("assistant", html);
@@ -286,13 +349,17 @@ function getSettings() {
 }
 
 async function loadWorkspaceSettings(slug) {
+  _log.debug(`loadWorkspaceSettings: fetching settings for '${slug}'`);
   try {
     const res = await fetch(`/api/workspaces/${slug}`);
     if (res.ok) {
       _workspaceSettings = await res.json();
+      _log.info(`loadWorkspaceSettings: loaded — followup_enabled=${_workspaceSettings.followup_enabled} followup_count=${_workspaceSettings.followup_count} default_question_categories=${(_workspaceSettings.default_questions || []).length}`);
+    } else {
+      _log.warn(`loadWorkspaceSettings: server returned ${res.status} — using defaults`);
     }
-  } catch (_) {
-    // Network error — keep defaults
+  } catch (err) {
+    _log.warn("loadWorkspaceSettings: network error — using defaults:", err);
   }
   chatWindow.dataset.emptyText = _workspaceSettings.welcome_text || "Send a message to get started.";
   renderDefaultQuestionsBar();
@@ -473,12 +540,31 @@ messageInput.addEventListener("keydown", (e) => {
 
 async function sendMessage(overrideText) {
   const text = overrideText !== undefined ? overrideText : messageInput.value.trim();
-  if (!text || isBusy) return;
+  if (!text || isBusy) {
+    if (isBusy) _log.warn("sendMessage: blocked — isBusy=true");
+    return;
+  }
+
+  // Block send if a file is still being processed
+  if (attachedFile && attachedFile.state === "loading") {
+    _log.warn(`sendMessage: blocked — file '${attachedFile.filename}' is still processing`);
+    // Give the user a brief visual hint
+    const chip = fileAttachmentsEl.querySelector(".file-chip");
+    if (chip) {
+      chip.style.outline = "2px solid var(--uri-gold)";
+      setTimeout(() => { chip.style.outline = ""; }, 1200);
+    }
+    return;
+  }
 
   // If somehow there's no active session yet, create one first
   if (!activeSessionId) {
+    _log.warn("sendMessage: no active session — creating one first");
     await startNewChat();
-    if (!activeSessionId) return; // still failed
+    if (!activeSessionId) {
+      _log.error("sendMessage: still no session after startNewChat — aborting");
+      return;
+    }
   }
 
   dismissDefaultQuestionsBar();
@@ -489,8 +575,30 @@ async function sendMessage(overrideText) {
 
   const settings = getSettings();
 
-  // Append user bubble immediately
-  appendMessage("user", escapeHtml(text));
+  // Capture the file context before clearing (so it's used for this message only)
+  const fileCtx = (attachedFile && attachedFile.state === "ready") ? { ...attachedFile } : null;
+
+  _log.group(`sendMessage: "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`);
+  _log.debug("session_id:", activeSessionId);
+  _log.debug("message length:", text.length, "chars");
+  _log.debug("history turns:", (getSession(activeSessionId)?.messages || []).length);
+  _log.debug("followup_enabled:", settings.followup_enabled);
+  if (fileCtx) {
+    _log.info("file attached:", fileCtx.filename,
+      `(markdown=${fileCtx.markdown.length} chars, summary=${fileCtx.summary.length} chars)`);
+    _log.debug("file summary:", fileCtx.summary);
+  }
+  _log.groupEnd();
+
+  // Append user bubble immediately — include the filename if a file is attached
+  let userHtml = escapeHtml(text);
+  if (fileCtx) {
+    userHtml = `<span class="user-file-badge">${_fileIcon(fileCtx.filename)}<span>${escapeHtml(fileCtx.filename)}</span></span>${userHtml}`;
+  }
+  appendMessage("user", userHtml);
+
+  // Clear the attachment now (consumed by this message)
+  if (fileCtx) removeAttachment();
 
   // Get the current session for history re-seeding
   const session = getSession(activeSessionId);
@@ -508,20 +616,39 @@ async function sendMessage(overrideText) {
   let fullText = "";
   let started = false;
   let sources = [];
+  let tokenCount = 0;
+
+  _log.time(`stream session=${activeSessionId}`);
 
   try {
+    const requestBody = {
+      message: text,
+      session_id: activeSessionId,
+      history: history,
+      followup_suffix: followupSuffix,
+    };
+    if (fileCtx) {
+      requestBody.file_context = {
+        filename: fileCtx.filename,
+        markdown: fileCtx.markdown,
+        summary: fileCtx.summary,
+      };
+    }
+
+    _log.debug(`sendMessage: POST /api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`,
+      { message_len: text.length, history_turns: history.length, has_file: !!fileCtx });
+
     const res = await fetch(`/api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: text,
-        session_id: activeSessionId,
-        history: history,
-        followup_suffix: followupSuffix,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
-    if (!res.ok) throw new Error(`Server error ${res.status}`);
+    if (!res.ok) {
+      _log.error(`sendMessage: stream endpoint returned HTTP ${res.status}`);
+      throw new Error(`Server error ${res.status}`);
+    }
+    _log.debug("sendMessage: SSE stream opened — reading tokens…");
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -544,8 +671,19 @@ async function sendMessage(overrideText) {
         try {
           const chunk = JSON.parse(raw);
 
+          if (chunk.error) {
+            // RhodyRAG fired an event: error — surface it to the user
+            _log.error("sendMessage: RhodyRAG error event:", chunk.error);
+            throw new Error(chunk.error);
+          }
+
           if (chunk.textResponse) {
-            if (!started) { started = true; bubble.innerHTML = ""; }
+            if (!started) {
+              started = true;
+              _log.debug("sendMessage: first token received — clearing typing indicator");
+              bubble.innerHTML = "";
+            }
+            tokenCount++;
             fullText += chunk.textResponse;
             const { mainText } = parseFollowUpQuestions(fullText);
             bubble.innerHTML = parseMarkdown(mainText);
@@ -554,8 +692,13 @@ async function sendMessage(overrideText) {
 
           if (chunk.sources && chunk.sources.length > 0) {
             sources = chunk.sources;
+            _log.debug(`sendMessage: received ${sources.length} source(s)`, sources.map(s => s.title));
           }
-        } catch (_) {}
+        } catch (parseErr) {
+          // Re-throw errors we deliberately raised above (RhodyRAG error events)
+          if (parseErr.message && !parseErr.message.startsWith("Unexpected")) throw parseErr;
+          _log.warn("sendMessage: failed to parse SSE chunk:", raw.slice(0, 100), parseErr);
+        }
       }
     }
 
@@ -572,12 +715,21 @@ async function sendMessage(overrideText) {
           if (chunk.sources && chunk.sources.length > 0) {
             sources = chunk.sources;
           }
-        } catch (_) {}
+        } catch (parseErr) {
+          _log.warn("sendMessage: failed to parse final SSE chunk:", raw.slice(0, 100), parseErr);
+        }
       }
     }
 
+    _log.timeEnd(`stream session=${activeSessionId}`);
+    _log.info(`sendMessage: stream complete — ${tokenCount} token chunks, ${sources.length} source(s), response=${fullText.length} chars`);
+
     // Final render with follow-up question extraction
     const { mainText, questions } = parseFollowUpQuestions(fullText);
+
+    if (questions.length > 0) {
+      _log.debug(`sendMessage: parsed ${questions.length} follow-up question(s)`);
+    }
 
     if (sources.length > 0) {
       bubble.innerHTML = parseMarkdown(mainText) + buildCitations(sources);
@@ -604,9 +756,12 @@ async function sendMessage(overrideText) {
     if (!currentSession.title) {
       currentSession.title = text.slice(0, 55) + (text.length > 55 ? "…" : "");
       chatPanelTitle.textContent = currentSession.title;
+      _log.debug(`sendMessage: set session title to "${currentSession.title}"`);
     }
 
-    currentSession.messages.push({ role: "user", content: text });
+    const userMsg = { role: "user", content: text };
+    if (fileCtx) userMsg.filename = fileCtx.filename;
+    currentSession.messages.push(userMsg);
     currentSession.messages.push({
       role: "assistant",
       content: mainText,
@@ -614,9 +769,12 @@ async function sendMessage(overrideText) {
     });
 
     upsertSession(currentSession);
+    _log.debug(`sendMessage: session saved — total messages=${currentSession.messages.length}`);
     renderSessionList();
 
   } catch (err) {
+    _log.timeEnd(`stream session=${activeSessionId}`);
+    _log.error("sendMessage: stream failed:", err);
     bubble.classList.add("error");
     bubble.innerHTML = `Error: ${escapeHtml(err.message)}`;
   } finally {
@@ -628,8 +786,172 @@ async function sendMessage(overrideText) {
 }
 
 // ---------------------------------------------------------------------------
-// escapeHtml utility
+// File attachment state
 // ---------------------------------------------------------------------------
+// A single file can be attached per message.
+// States: null | { state: "loading", filename } | { state: "ready", filename, markdown, summary }
+//                                                 | { state: "error", filename, error }
+
+let attachedFile = null;
+
+const fileAttachmentsEl = document.getElementById("file-attachments");
+const fileInputEl       = document.getElementById("file-input");
+
+// ---------------------------------------------------------------------------
+// File type helpers
+// ---------------------------------------------------------------------------
+
+function _fileIcon(filename) {
+  const ext = (filename.split(".").pop() || "").toLowerCase();
+  if (["png","jpg","jpeg","gif","webp","bmp","tiff","tif"].includes(ext)) {
+    // Image icon
+    return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`;
+  }
+  if (ext === "pdf") {
+    // PDF icon
+    return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/></svg>`;
+  }
+  // Generic document icon
+  return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+}
+
+// ---------------------------------------------------------------------------
+// Chip rendering
+// ---------------------------------------------------------------------------
+
+function renderFileAttachments() {
+  fileAttachmentsEl.innerHTML = "";
+
+  if (!attachedFile) {
+    fileAttachmentsEl.style.display = "none";
+    return;
+  }
+
+  fileAttachmentsEl.style.display = "flex";
+
+  const chip = document.createElement("div");
+  chip.className = "file-chip";
+
+  if (attachedFile.state === "loading") {
+    chip.classList.add("loading");
+    chip.innerHTML = `
+      <span class="file-chip-spinner"></span>
+      <span class="file-chip-name">${escapeHtml(attachedFile.filename)}</span>
+      <span class="file-chip-status">Processing…</span>
+    `;
+  } else if (attachedFile.state === "error") {
+    chip.classList.add("error");
+    chip.innerHTML = `
+      ${_fileIcon(attachedFile.filename)}
+      <span class="file-chip-name">${escapeHtml(attachedFile.filename)}</span>
+      <span class="file-chip-status">${escapeHtml(attachedFile.error)}</span>
+      <button class="file-chip-remove" title="Remove" onclick="removeAttachment()">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    `;
+  } else {
+    // ready
+    chip.innerHTML = `
+      <span class="file-chip-icon">${_fileIcon(attachedFile.filename)}</span>
+      <span class="file-chip-name">${escapeHtml(attachedFile.filename)}</span>
+      <button class="file-chip-remove" title="Remove attachment" onclick="removeAttachment()">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    `;
+  }
+
+  fileAttachmentsEl.appendChild(chip);
+}
+
+function removeAttachment() {
+  attachedFile = null;
+  // Reset the file input so the same file can be re-selected
+  fileInputEl.value = "";
+  renderFileAttachments();
+}
+
+// ---------------------------------------------------------------------------
+// File selection handler (fires when the hidden <input type="file"> changes)
+// ---------------------------------------------------------------------------
+
+function handleFileSelect(input) {
+  const file = input.files && input.files[0];
+  if (!file) {
+    _log.warn("handleFileSelect: no file selected");
+    return;
+  }
+
+  _log.info(`handleFileSelect: '${file.name}' (${(file.size / 1024).toFixed(1)} KB, type='${file.type}')`);
+
+  // Replace any existing attachment immediately
+  if (attachedFile) {
+    _log.debug(`handleFileSelect: replacing existing attachment '${attachedFile.filename}'`);
+  }
+  attachedFile = { state: "loading", filename: file.name };
+  renderFileAttachments();
+
+  uploadFile(file);
+}
+
+// ---------------------------------------------------------------------------
+// Upload & process the file via the backend
+// ---------------------------------------------------------------------------
+
+async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  _log.info(`uploadFile: uploading '${file.name}' to /api/upload/${WORKSPACE_SLUG}`);
+  _log.time(`uploadFile: ${file.name}`);
+
+  try {
+    const res = await fetch(`/api/upload/${WORKSPACE_SLUG}`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!res.ok) {
+      let detail = `Server error ${res.status}`;
+      try {
+        const body = await res.json();
+        if (body.detail) detail = body.detail;
+      } catch (_) {}
+      _log.error(`uploadFile: server returned HTTP ${res.status} — ${detail}`);
+      throw new Error(detail);
+    }
+
+    const data = await res.json();
+    _log.timeEnd(`uploadFile: ${file.name}`);
+    _log.info(
+      `uploadFile: success — markdown=${data.markdown?.length ?? 0} chars, summary=${data.summary?.length ?? 0} chars`,
+    );
+    _log.group(`uploadFile: summary — ${file.name}`);
+    console.info(data.summary ?? "(none)");
+    console.groupEnd();
+    const mdPreview = (data.markdown ?? "").slice(0, 300);
+    _log.group(`uploadFile: markdown preview (first 300 chars) — ${file.name}`);
+    console.info(mdPreview + (data.markdown?.length > 300 ? "\n[...]" : ""));
+    console.groupEnd();
+
+    // data = { filename, markdown, summary }
+    attachedFile = {
+      state: "ready",
+      filename: data.filename,
+      markdown: data.markdown,
+      summary: data.summary,
+    };
+  } catch (err) {
+    _log.timeEnd(`uploadFile: ${file.name}`);
+    _log.error(`uploadFile: failed for '${file.name}':`, err);
+    attachedFile = {
+      state: "error",
+      filename: attachedFile ? attachedFile.filename : file.name,
+      error: err.message || "Upload failed",
+    };
+  }
+
+  renderFileAttachments();
+}
 
 function escapeHtml(str) {
   return String(str)
@@ -644,15 +966,18 @@ function escapeHtml(str) {
 // ---------------------------------------------------------------------------
 
 // Load workspace settings (WORKSPACE_SLUG injected by Jinja2)
+_log.info(`utils.js initialising — workspace='${WORKSPACE_SLUG}'`);
 loadWorkspaceSettings(WORKSPACE_SLUG);
 
 // Restore or start a session
 (async function init() {
   const sessions = loadSessions();
   if (sessions.length > 0) {
+    _log.info(`init: resuming most recent session '${sessions[0].session_id}'`);
     // Resume the most recent session
     selectSession(sessions[0].session_id);
   } else {
+    _log.info("init: no existing sessions — starting fresh");
     // No history at all — start a fresh session automatically
     await startNewChat();
   }
