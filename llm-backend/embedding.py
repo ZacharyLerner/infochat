@@ -143,10 +143,17 @@ def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
         doc.doc_id = doc_id          # sets ref_doc_id on all child nodes → top-level doc_id col in LanceDB
         doc.metadata["filename"] = filename
         doc.metadata["doc_id"] = doc_id
+        # doc_id is only needed for deletion filtering — exclude it from the
+        # text sent to the embedding model to avoid wasting context window tokens.
+        doc.excluded_embed_metadata_keys = ["doc_id"]
+
+    # Cap chunk_size to 1900 tokens so metadata overhead never pushes a chunk
+    # over a 2048-token embedding model context window (e.g. qwen3-embed-8b).
+    chunk_size = min(ws["chunk_size"], 1900)
 
     # Chunk documents
     splitter = SentenceSplitter(
-        chunk_size=ws["chunk_size"],
+        chunk_size=chunk_size,
         chunk_overlap=ws["chunk_overlap"],
     )
     nodes = splitter.get_nodes_from_documents(documents)

@@ -20,6 +20,17 @@ import asyncio
 import json
 from typing import AsyncGenerator
 
+# Embedding models like qwen3-embed-8b have a 2048-token context window.
+# Truncate retrieval queries to this many characters as a safe guard — well
+# under 2048 tokens for any realistic text (avg ~4 chars/token → ~7000 chars
+# for 1750 tokens, leaving headroom).
+_MAX_EMBED_CHARS = 6000
+
+
+def _safe_embed_query(text: str) -> str:
+    """Truncate text to _MAX_EMBED_CHARS to avoid embedding model context overflow."""
+    return text[:_MAX_EMBED_CHARS] if len(text) > _MAX_EMBED_CHARS else text
+
 from llama_index.core import VectorStoreIndex
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.postprocessor import SimilarityPostprocessor
@@ -157,7 +168,7 @@ async def stream_chat_session(
     # When a large document is attached, the caller passes a concise
     # retrieval_query (summary + question) while the full document context
     # lives only in `message` for the LLM.
-    embed_query = retrieval_query if retrieval_query else message
+    embed_query = _safe_embed_query(retrieval_query if retrieval_query else message)
 
     try:
         # ── 1. Get or build session state ────────────────────────────────────
@@ -318,7 +329,7 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
         # NOTE: LanceDBVectorStore.aquery() is not truly async — it calls the
         # sync .query() internally. Use to_thread to keep the event loop free.
         retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
-        nodes = await asyncio.to_thread(retriever.retrieve, question)
+        nodes = await asyncio.to_thread(retriever.retrieve, _safe_embed_query(question))
 
         # Apply similarity threshold post-processing
         threshold = workspace["similarity_threshold"]
