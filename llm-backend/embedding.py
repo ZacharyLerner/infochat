@@ -8,7 +8,9 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import uuid
+from collections import defaultdict
 
 from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex
 from llama_index.core.embeddings import BaseEmbedding
@@ -17,6 +19,19 @@ from llama_index.embeddings.litellm import LiteLLMEmbedding
 from llama_index.vector_stores.lancedb import LanceDBVectorStore
 
 import config
+
+# Per-workspace locks to serialize concurrent LanceDB write operations.
+# Multiple asyncio.to_thread() calls for the same workspace slug can run on
+# different OS threads simultaneously; without serialization, concurrent
+# Append and Overwrite transactions conflict inside LanceDB.
+_lancedb_lock_map: dict[str, threading.Lock] = defaultdict(threading.Lock)
+_lancedb_lock_map_lock = threading.Lock()
+
+
+def _get_workspace_lock(slug: str) -> threading.Lock:
+    """Return (and create if needed) the per-workspace threading.Lock."""
+    with _lancedb_lock_map_lock:
+        return _lancedb_lock_map[slug]
 
 
 def build_embed_model(embed_model: str, api_key: str = "", embed_api_key: str = "") -> BaseEmbedding:
@@ -85,21 +100,23 @@ def delete_workspace_file(slug: str, doc_id: str) -> int:
     """
     import lancedb
 
-    db = lancedb.connect(config.LANCEDB_DIR)
-    tname = table_name(slug)
-    if tname not in db.table_names():
-        return 0
+    ws_lock = _get_workspace_lock(slug)
+    with ws_lock:
+        db = lancedb.connect(config.LANCEDB_DIR)
+        tname = table_name(slug)
+        if tname not in db.table_names():
+            return 0
 
-    tbl = db.open_table(tname)
-    # Count matching rows before deletion
-    try:
-        count = len(tbl.search().where(f"doc_id = '{doc_id}'").to_list())
-    except Exception:
-        count = 0
+        tbl = db.open_table(tname)
+        # Count matching rows before deletion
+        try:
+            count = len(tbl.search().where(f"doc_id = '{doc_id}'").to_list())
+        except Exception:
+            count = 0
 
-    if count > 0:
-        tbl.delete(f"doc_id = '{doc_id}'")
-    return count
+        if count > 0:
+            tbl.delete(f"doc_id = '{doc_id}'")
+        return count
 
 
 def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
@@ -159,15 +176,19 @@ def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
     )
     nodes = splitter.get_nodes_from_documents(documents)
 
-    # Embed and store
+    # Embed and store.
+    # Acquire the per-workspace lock before touching LanceDB to prevent concurrent
+    # Append/Overwrite transaction conflicts when multiple files are uploaded at the
+    # same time for the same workspace (each runs in its own asyncio.to_thread worker).
     embed = build_embed_model(embed_model, api_key=api_key, embed_api_key=embed_api_key)
-    vector_store = get_vector_store(slug)
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-    VectorStoreIndex(
-        nodes,
-        embed_model=embed,
-        storage_context=storage_context,
-    )
+    ws_lock = _get_workspace_lock(slug)
+    with ws_lock:
+        vector_store = get_vector_store(slug)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        VectorStoreIndex(
+            nodes,
+            embed_model=embed,
+            storage_context=storage_context,
+        )
 
     return len(nodes), doc_id

@@ -207,12 +207,18 @@ def update_workspace(slug: str, body: UpdateWorkspace):
 
 
 def _drop_lancedb_table(slug: str) -> None:
-    """Sync helper: drop the LanceDB table for a workspace if it exists."""
+    """Sync helper: drop the LanceDB table for a workspace if it exists.
+
+    Acquires the per-workspace lock so a concurrent in-flight embed cannot
+    write to the table while it is being dropped.
+    """
     import lancedb as _lancedb
-    ldb = _lancedb.connect(config.LANCEDB_DIR)
-    tname = embedding.table_name(slug)
-    if tname in ldb.table_names():
-        ldb.drop_table(tname)
+    ws_lock = embedding._get_workspace_lock(slug)
+    with ws_lock:
+        ldb = _lancedb.connect(config.LANCEDB_DIR)
+        tname = embedding.table_name(slug)
+        if tname in ldb.table_names():
+            ldb.drop_table(tname)
 
 
 @app.delete("/workspace/{slug}", summary="Delete a workspace")
@@ -415,7 +421,8 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
 async def delete_chat_session(slug: str, session_id: str):
     """Remove the chat session from the in-process registry. The browser
     should also remove it from localStorage."""
-    query._chat_sessions.pop(session_id, None)
+    with query._chat_sessions_lock:
+        query._chat_sessions.pop(session_id, None)
     return None
 
 
@@ -430,7 +437,8 @@ class DocRecord(BaseModel):
 
 @app.get("/docs/{slug}", summary="List tracked documents for a workspace")
 def list_docs(slug: str):
-    data = _read_docs()
+    with _docs_lock:
+        data = _read_docs()
     return data.get(slug, [])
 
 

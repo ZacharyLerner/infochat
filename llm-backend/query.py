@@ -45,8 +45,16 @@ from embedding import build_embed_model, get_vector_store
 # In-process chat session registry
 # Maps session_id (str UUID) → {"index": VectorStoreIndex, "memory": ChatMemoryBuffer, "workspace": dict}
 # Lost on server restart; re-seeded from browser history on first message.
+#
+# _chat_sessions_lock serializes session creation so that two concurrent
+# first-messages to the same session don't each build (and then overwrite)
+# their own index state. Individual message turns within an established session
+# are serialized by the same lock — per-session locks would be cleaner but the
+# session count is small and index builds are the bottleneck, not the dict ops.
 # ---------------------------------------------------------------------------
+import threading as _threading
 _chat_sessions: dict = {}
+_chat_sessions_lock = _threading.Lock()
 
 
 # Gateway model strings are not in LiteLLM's registry, so it falls back to a
@@ -172,6 +180,7 @@ async def stream_chat_session(
 
     try:
         # ── 1. Get or build session state ────────────────────────────────────
+        # Check outside the lock first (fast path — no blocking).
         if session_id not in _chat_sessions:
             state = await asyncio.to_thread(_build_session_state, workspace, history or [])
             if state is None:
@@ -179,9 +188,14 @@ async def stream_chat_session(
                 yield "event: sources\ndata: []\n\n"
                 yield "event: done\ndata: [DONE]\n\n"
                 return
-            _chat_sessions[session_id] = state
+            # Re-check under the lock to avoid a race where two concurrent
+            # first-messages both build state and overwrite each other.
+            with _chat_sessions_lock:
+                if session_id not in _chat_sessions:
+                    _chat_sessions[session_id] = state
 
-        state = _chat_sessions[session_id]
+        with _chat_sessions_lock:
+            state = _chat_sessions[session_id]
         index = state["index"]
         memory = state["memory"]
 

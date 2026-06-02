@@ -28,9 +28,9 @@ PORT = int(os.getenv("PORT", "3001"))
 
 # --- Downstream service propagation ------------------------------------------
 # File-server (document upload/management)
-FILE_SERVER_URL = os.getenv("FILE_SERVER_URL")
+FILE_SERVER_URL = os.getenv("FILE_SERVER_URL", "http://10.140.2.31:3001")
 FILE_SERVER_API_KEY = os.getenv("FILE_SERVER_API_KEY", "")
 
 # Chat-frontend server (workspace UI / chat)
-CHAT_SERVER_URL = os.getenv("CHAT_SERVER_URL")
+CHAT_SERVER_URL = os.getenv("CHAT_SERVER_URL", "http://10.140.2.30:3000")
 CHAT_SERVER_API_KEY = os.getenv("CHAT_SERVER_API_KEY", "")
