@@ -22,6 +22,7 @@ never raise — they must not block or roll back the primary operation.
 """
 
 import logging
+import threading
 from typing import Optional
 
 import httpx
@@ -102,24 +103,102 @@ def _delete(base: str, path: str, headers: dict) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def on_workspace_created(slug: str, name: str) -> None:
-    """
-    Called after a workspace is successfully created on this server.
+def _run_in_background(fn, *args, **kwargs) -> None:
+    """Fire-and-forget: run fn in a daemon thread so callers return immediately."""
+    t = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
+    t.start()
 
-    Replicates the workspace to:
-      - File server:  POST /api/v1/workspaces/new  { id, name }
-      - Chat server:  POST /api/workspaces          { slug, name }
-    """
+
+def _do_create(slug: str, name: str) -> None:
     # --- File server ---------------------------------------------------------
-    # Use /db to register in the file server's local database only.
-    # The workspace already exists on this RAG backend, so /new would cause
-    # the file server to call back here and get a conflict error.
     result = _post(
         _FILE_BASE,
         "/api/v1/workspaces/db",
         _FILE_HEADERS,
         {"id": slug, "name": name},
     )
+    if result is None:
+        logger.error("manager: failed to create workspace '%s' on file server (%s)", slug, _FILE_BASE)
+    else:
+        logger.info("manager: workspace '%s' created on file server", slug)
+
+    # --- Chat server ---------------------------------------------------------
+    result = _post(
+        _CHAT_BASE,
+        "/api/workspaces",
+        _CHAT_HEADERS,
+        {"slug": slug, "name": name, "followup_enabled": True, "followup_count": 3},
+    )
+    if result is None:
+        logger.error("manager: failed to create workspace '%s' on chat server (%s)", slug, _CHAT_BASE)
+    else:
+        logger.info("manager: workspace '%s' created on chat server", slug)
+
+
+def _do_rename(slug: str, new_name: str) -> None:
+    # --- File server ---------------------------------------------------------
+    file_result = _patch(
+        _FILE_BASE,
+        f"/api/v1/workspaces/{slug}",
+        _FILE_HEADERS,
+        {"name": new_name},
+    )
+    if file_result is None:
+        logger.error("manager: failed to rename workspace '%s' on file server (%s)", slug, _FILE_BASE)
+    else:
+        logger.info("manager: workspace '%s' renamed to '%s' on file server", slug, new_name)
+
+    # --- Chat server ---------------------------------------------------------
+    result = _put(
+        _CHAT_BASE,
+        f"/api/workspaces/{slug}",
+        _CHAT_HEADERS,
+        {"name": new_name},
+    )
+    if result is None:
+        logger.error("manager: failed to rename workspace '%s' on chat server (%s)", slug, _CHAT_BASE)
+    else:
+        logger.info("manager: workspace '%s' renamed to '%s' on chat server", slug, new_name)
+
+
+def _do_delete(slug: str) -> None:
+    # --- File server ---------------------------------------------------------
+    ok = _delete(_FILE_BASE, f"/api/v1/workspaces/{slug}", _FILE_HEADERS)
+    if not ok:
+        logger.error("manager: failed to delete workspace '%s' on file server (%s)", slug, _FILE_BASE)
+    else:
+        logger.info("manager: workspace '%s' deleted on file server", slug)
+
+    # --- Chat server ---------------------------------------------------------
+    ok = _delete(_CHAT_BASE, f"/api/workspaces/{slug}", _CHAT_HEADERS)
+    if not ok:
+        logger.error("manager: failed to delete workspace '%s' on chat server (%s)", slug, _CHAT_BASE)
+    else:
+        logger.info("manager: workspace '%s' deleted on chat server", slug)
+
+
+def on_workspace_created(slug: str, name: str) -> None:
+    """
+    Called after a workspace is successfully created on this server.
+    Propagates to file server and chat server in a background thread.
+    """
+    _run_in_background(_do_create, slug, name)
+
+
+def on_workspace_renamed(slug: str, new_name: str) -> None:
+    """
+    Called after a workspace name is successfully updated on this server.
+    Propagates to file server and chat server in a background thread.
+    """
+    _run_in_background(_do_rename, slug, new_name)
+
+
+def on_workspace_deleted(slug: str) -> None:
+    """
+    Called after a workspace is successfully deleted on this server.
+    Propagates to file server and chat server in a background thread.
+    """
+    _run_in_background(_do_delete, slug)
     if result is None:
         logger.error(
             "manager: failed to create workspace '%s' on file server (%s)",

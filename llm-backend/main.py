@@ -20,6 +20,8 @@ _httpx_logger.setLevel(_logging.WARNING)
 
 import json
 import os
+import tempfile
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -38,6 +40,7 @@ import query
 
 # --- Doc tracking (JSON file) ------------------------------------------------
 DOCS_FILE = Path("docs.json")
+_docs_lock = threading.Lock()
 
 
 def _read_docs() -> Dict[str, Any]:
@@ -47,15 +50,28 @@ def _read_docs() -> Dict[str, Any]:
 
 
 def _write_docs(data: Dict[str, Any]):
-    DOCS_FILE.write_text(json.dumps(data, indent=2))
+    """Atomically write docs.json using a temp file + rename to avoid corruption."""
+    text = json.dumps(data, indent=2)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=DOCS_FILE.parent, suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            f.write(text)
+        os.replace(tmp_path, DOCS_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # --- Lifespan ----------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init_db()
-    if not DOCS_FILE.exists():
-        _write_docs({})
+    import asyncio
+    await asyncio.to_thread(db.init_db)
+    if not await asyncio.to_thread(DOCS_FILE.exists):
+        await asyncio.to_thread(_write_docs, {})
     yield
 
 
@@ -190,80 +206,114 @@ def update_workspace(slug: str, body: UpdateWorkspace):
     return ws
 
 
-@app.delete("/workspace/{slug}", summary="Delete a workspace")
-def delete_workspace(slug: str):
-    if db.get_workspace(slug) is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    # Drop the LanceDB table if it exists
+def _drop_lancedb_table(slug: str) -> None:
+    """Sync helper: drop the LanceDB table for a workspace if it exists."""
     import lancedb as _lancedb
     ldb = _lancedb.connect(config.LANCEDB_DIR)
     tname = embedding.table_name(slug)
     if tname in ldb.table_names():
         ldb.drop_table(tname)
 
-    # Remove doc tracking records
-    data = _read_docs()
-    data.pop(slug, None)
-    _write_docs(data)
 
-    db.delete_workspace(slug)
-    manager.on_workspace_deleted(slug=slug)
+@app.delete("/workspace/{slug}", summary="Delete a workspace")
+async def delete_workspace(slug: str):
+    import asyncio
+    ws = await asyncio.to_thread(db.get_workspace, slug)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # Drop the LanceDB table (blocking disk I/O — offload to thread)
+    await asyncio.to_thread(_drop_lancedb_table, slug)
+
+    # Remove doc tracking records (blocking file I/O — offload to thread)
+    def _remove_docs():
+        with _docs_lock:
+            data = _read_docs()
+            data.pop(slug, None)
+            _write_docs(data)
+    await asyncio.to_thread(_remove_docs)
+
+    await asyncio.to_thread(db.delete_workspace, slug)
+    manager.on_workspace_deleted(slug=slug)  # fire-and-forget background thread
     return {"status": "ok", "slug": slug}
 
 
 # --- Embed -------------------------------------------------------------------
+def _record_doc(slug: str, doc_id: str, filename: str, chunks: int) -> None:
+    """Sync helper: append a doc record to docs.json under the lock."""
+    from datetime import datetime, timezone
+    with _docs_lock:
+        data = _read_docs()
+        if slug not in data:
+            data[slug] = []
+        data[slug].append({
+            "doc_id": doc_id,
+            "filename": filename,
+            "chunks_embedded": chunks,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _write_docs(data)
+
+
 @app.post("/workspace/{slug}/embed", summary="Upload and embed a file")
 async def embed_file(slug: str, file: UploadFile = File(..., description="File to parse and embed. Supported types include PDF, DOCX, and plain text.")):
-    if db.get_workspace(slug) is None:
+    import asyncio, io
+    ws = await asyncio.to_thread(db.get_workspace, slug)
+    if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
-    try:
-        chunks, doc_id = embedding.embed_workspace_file(slug, file.filename, file.file)
-    finally:
-        await file.close()
+    # Read the upload bytes on the async side before handing off to a thread,
+    # so the thread receives a plain BytesIO and never touches the async file object.
+    file_bytes = await file.read()
+    await file.close()
+
+    filename = file.filename
+    chunks, doc_id = await asyncio.to_thread(
+        embedding.embed_workspace_file, slug, filename, io.BytesIO(file_bytes)
+    )
 
     if chunks == 0:
         raise HTTPException(status_code=422, detail="No text could be extracted")
 
-    # Record in docs.json so the web view stays in sync regardless of upload source
-    from datetime import datetime, timezone
-    data = _read_docs()
-    if slug not in data:
-        data[slug] = []
-    data[slug].append({
-        "doc_id": doc_id,
-        "filename": file.filename,
-        "chunks_embedded": chunks,
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-    })
-    _write_docs(data)
+    # Record in docs.json (blocking file I/O — offload to thread)
+    await asyncio.to_thread(_record_doc, slug, doc_id, filename, chunks)
 
-    return {"status": "ok", "slug": slug, "filename": file.filename,
+    return {"status": "ok", "slug": slug, "filename": filename,
             "doc_id": doc_id, "chunks_embedded": chunks}
 
 
+def _remove_doc_from_json(slug: str, doc_id: str) -> None:
+    """Sync helper: remove a doc record from docs.json under the lock."""
+    with _docs_lock:
+        data = _read_docs()
+        if slug in data:
+            data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
+        _write_docs(data)
+
+
 @app.delete("/workspace/{slug}/embed/{doc_id:path}", summary="Delete an embedded file")
-def delete_embed(slug: str, doc_id: str):
-    if db.get_workspace(slug) is None:
+async def delete_embed(slug: str, doc_id: str):
+    import asyncio
+    ws = await asyncio.to_thread(db.get_workspace, slug)
+    if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    deleted = embedding.delete_workspace_file(slug, doc_id)
+    deleted = await asyncio.to_thread(embedding.delete_workspace_file, slug, doc_id)
 
     if deleted == 0:
         # Check if the doc was tracked in docs.json even if no vectors were found
-        data = _read_docs()
+        def _check_tracked():
+            with _docs_lock:
+                return _read_docs()
+        data = await asyncio.to_thread(_check_tracked)
         tracked = any(d.get("doc_id") == doc_id for d in data.get(slug, []))
         if not tracked:
             raise HTTPException(status_code=404, detail="Document not found")
 
-    # Keep docs.json in sync
-    data = _read_docs()
-    if slug in data:
-        data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
-    _write_docs(data)
+    # Keep docs.json in sync (blocking file I/O — offload to thread)
+    await asyncio.to_thread(_remove_doc_from_json, slug, doc_id)
 
     return {"status": "ok", "slug": slug, "doc_id": doc_id, "chunks_deleted": deleted}
 
@@ -271,16 +321,17 @@ def delete_embed(slug: str, doc_id: str):
 # --- Query -------------------------------------------------------------------
 @app.post("/workspace/{slug}/query", summary="Query a workspace")
 async def query_workspace(slug: str, body: QueryRequest):
-    ws = db.get_workspace(slug)
+    import asyncio
+    ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    import asyncio
     return await asyncio.to_thread(query.query_workspace, ws, body.question)
 
 
 @app.post("/workspace/{slug}/query/stream", summary="Stream a query response")
 async def stream_query_workspace(slug: str, body: QueryRequest):
-    ws = db.get_workspace(slug)
+    import asyncio
+    ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return StreamingResponse(
@@ -325,7 +376,8 @@ class ChatSessionStreamRequest(BaseModel):
 async def create_chat_session(slug: str):
     """Returns a fresh session_id UUID. The client stores this and sends it
     back on subsequent /chat/{session_id}/stream requests."""
-    ws = db.get_workspace(slug)
+    import asyncio
+    ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return {"session_id": str(_uuid.uuid4())}
@@ -340,7 +392,8 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
     if the session is not in the in-process registry (e.g. after a server
     restart), ensuring follow-up questions always have context.
     """
-    ws = db.get_workspace(slug)
+    import asyncio
+    ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     history = [m.model_dump() for m in (body.history or [])]
@@ -383,28 +436,31 @@ def list_docs(slug: str):
 
 @app.post("/docs/{slug}", status_code=201, summary="Track a document record")
 def add_doc(slug: str, body: DocRecord):
-    data = _read_docs()
-    if slug not in data:
-        data[slug] = []
-    data[slug].append(body.model_dump())
-    _write_docs(data)
+    with _docs_lock:
+        data = _read_docs()
+        if slug not in data:
+            data[slug] = []
+        data[slug].append(body.model_dump())
+        _write_docs(data)
     return {"ok": True}
 
 
 @app.delete("/docs/{slug}/{doc_id}", summary="Remove a document record")
 def remove_doc(slug: str, doc_id: str):
-    data = _read_docs()
-    if slug in data:
-        data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
-    _write_docs(data)
+    with _docs_lock:
+        data = _read_docs()
+        if slug in data:
+            data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
+        _write_docs(data)
     return {"ok": True}
 
 
 @app.delete("/docs/{slug}", summary="Remove all doc records for a workspace")
 def remove_workspace_docs(slug: str):
-    data = _read_docs()
-    data.pop(slug, None)
-    _write_docs(data)
+    with _docs_lock:
+        data = _read_docs()
+        data.pop(slug, None)
+        _write_docs(data)
     return {"ok": True}
 
 

@@ -176,9 +176,11 @@ async def stream_chat_session(
 
         # ── 2. Retrieve relevant context nodes ───────────────────────────────
         # Use embed_query (short) for retrieval — never the full LLM message.
+        # NOTE: LanceDBVectorStore.aquery() is not truly async — it calls the
+        # sync .query() internally. Use to_thread to keep the event loop free.
         threshold = workspace["similarity_threshold"]
         retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
-        nodes = await retriever.aretrieve(embed_query)
+        nodes = await asyncio.to_thread(retriever.retrieve, embed_query)
         nodes = [n for n in nodes if n.score is None or n.score >= threshold]
 
         sources = [
@@ -313,8 +315,10 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             return
 
         # --- Step 1: Retrieve relevant nodes ---
+        # NOTE: LanceDBVectorStore.aquery() is not truly async — it calls the
+        # sync .query() internally. Use to_thread to keep the event loop free.
         retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
-        nodes = await retriever.aretrieve(question)
+        nodes = await asyncio.to_thread(retriever.retrieve, question)
 
         # Apply similarity threshold post-processing
         threshold = workspace["similarity_threshold"]
