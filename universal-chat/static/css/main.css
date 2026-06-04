@@ -1618,3 +1618,127 @@ details.embed-snippet-section[open] .embed-chevron {
 .modal-btn-danger:hover {
     background: #991b1b;
 }
+
+.modal-btn-primary {
+    background: var(--uri-blue);
+    color: #fff;
+}
+
+.modal-btn-primary:hover {
+    background: var(--uri-blue-mid);
+}
+
+.modal-btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* ========== Email Confirmation Modal ========== */
+.email-modal-box {
+    max-width: 520px;
+}
+
+.email-modal-hint {
+    font-size: 13px;
+    color: var(--gray-mid);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.email-field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+}
+
+.email-field-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--uri-blue);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.email-required {
+    color: var(--error);
+}
+
+.email-field-input,
+.email-field-textarea {
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--uri-blue);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 7px 10px;
+    transition: border-color 0.12s;
+    resize: vertical;
+}
+
+.email-field-input:focus,
+.email-field-textarea:focus {
+    outline: none;
+    border-color: var(--uri-blue-light);
+}
+
+.email-field-textarea {
+    min-height: 120px;
+    line-height: 1.5;
+}
+
+.email-modal-status {
+    font-size: 13px;
+    min-height: 18px;
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
+.email-modal-status.error {
+    color: var(--error);
+}
+
+.email-modal-status.success {
+    color: #15803d;
+}
+
+/* ========== Email Outcome Bubble ========== */
+.email-bubble {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    line-height: 1.4;
+    flex-wrap: wrap;
+}
+
+.email-bubble-label {
+    font-weight: 600;
+}
+
+.email-bubble-detail {
+    color: var(--gray-mid);
+}
+
+.email-bubble-sent {
+    color: #15803d;
+}
+
+.email-bubble-cancelled {
+    color: var(--gray-mid);
+}
+
+/* ========== Drafting Email Bubble Indicator ========== */
+.drafting-email-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+}
+
+.drafting-email-label {
+    font-size: 13px;
+    color: var(--gray-mid);
+    font-style: italic;
+}

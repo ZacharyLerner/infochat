@@ -118,6 +118,40 @@
     </div><!-- /.chat-panel -->
   </div><!-- /.page-body -->
 
+  <!-- ========== Email Confirmation Modal ========== -->
+  <div class="modal-backdrop" id="email-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="email-modal-title">
+    <div class="modal-box email-modal-box">
+      <div class="modal-title" id="email-modal-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2,4 12,13 22,4"/></svg>
+        Review &amp; Send Email
+      </div>
+      <div class="modal-body">
+        <p class="email-modal-hint">The assistant drafted this email. Review and edit before sending.</p>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-from">From</label>
+          <input type="email" id="email-from" class="email-field-input" placeholder="noreply@uri.edu" />
+        </div>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-to">To <span class="email-required">*</span></label>
+          <input type="text" id="email-to" class="email-field-input" placeholder="recipient@uri.edu" />
+        </div>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-subject">Subject <span class="email-required">*</span></label>
+          <input type="text" id="email-subject" class="email-field-input" placeholder="Subject" />
+        </div>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-body">Body <span class="email-required">*</span></label>
+          <textarea id="email-body" class="email-field-textarea" rows="7" placeholder="Email body…"></textarea>
+        </div>
+        <div class="email-modal-status" id="email-modal-status"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-secondary" onclick="closeEmailConfirmModal()">Cancel</button>
+        <button class="modal-btn modal-btn-primary" id="email-send-btn" onclick="confirmSendEmail()">Send Email</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const WORKSPACE_SLUG = "{{ slug }}";
 

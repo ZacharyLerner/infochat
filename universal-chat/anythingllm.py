@@ -7,6 +7,19 @@ from config import API_URL, HEADERS
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Email skill prompt suffix — injected when email_enabled is True
+# ---------------------------------------------------------------------------
+
+EMAIL_PROMPT_SUFFIX = (
+    "\n\n[System: When the user asks to send or draft an email, your response "
+    "must begin with the EMAIL_ACTION block — before any other text:\n"
+    'EMAIL_ACTION:\n{"to":"<address>","subject":"<subject>",'
+    '"body":"<body with \\\\n for newlines>","from":"noreply@uri.edu"}\n'
+    "Never fabricate addresses — ask if unknown. Only emit EMAIL_ACTION when "
+    "the user explicitly requests it. No text before the EMAIL_ACTION line.]"
+)
+
 # Maximum number of characters of document markdown injected into the LLM
 # message. This goes to the LLM only — the embedding model never sees it
 # (we send retrieval_query separately for vector search). The LLM context
@@ -88,6 +101,7 @@ async def stream_chat(
     session_id: str,
     reset: bool = False,
     followup_suffix: str = "",
+    email_suffix: str = "",
 ) -> AsyncGenerator[str, None]:
     """Stream a one-off query response from RhodyRAG (stateless, no session memory).
 
@@ -99,8 +113,9 @@ async def stream_chat(
     """
     url = f"{API_URL}/workspace/{slug}/query/stream"
     payload: dict = {"question": message}
-    if followup_suffix:
-        payload["prompt_suffix"] = followup_suffix
+    combined_suffix = followup_suffix + email_suffix
+    if combined_suffix:
+        payload["prompt_suffix"] = combined_suffix
 
     logger.debug(
         "stream_chat: slug=%s session=%s url=%s message_len=%d followup=%s",
@@ -137,6 +152,7 @@ async def stream_chat_session(
     message: str,
     history: Optional[list] = None,
     followup_suffix: str = "",
+    email_suffix: str = "",
     file_context: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response using a persistent ChatEngine session on RhodyRAG.
@@ -208,10 +224,11 @@ async def stream_chat_session(
         retrieval_query = None
         logger.debug("stream_chat_session: no file context — message_len=%d", len(message))
 
-    # Append follow-up suffix if enabled (only affects LLM, not retrieval)
-    if followup_suffix:
-        effective_message = effective_message + followup_suffix
-        logger.debug("stream_chat_session: followup_suffix appended (%d chars)", len(followup_suffix))
+    # Append prompt suffixes if enabled (only affects LLM, not retrieval)
+    combined_suffix = followup_suffix + email_suffix
+    if combined_suffix:
+        effective_message = effective_message + combined_suffix
+        logger.debug("stream_chat_session: prompt suffix appended (%d chars)", len(combined_suffix))
 
     payload: dict = {
         "message": effective_message,

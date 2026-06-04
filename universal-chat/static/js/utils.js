@@ -329,7 +329,11 @@ function selectSession(sessionId) {
       }
       appendMessage("user", userHtml);
     } else if (msg.role === "assistant") {
+      if (!msg.content) continue; // skip empty assistant placeholders
       const html = parseMarkdown(msg.content) + buildCitations(msg.sources || []);
+      appendMessage("assistant", html);
+    } else if (msg.role === "email") {
+      const html = buildEmailBubbleHtml(msg.to || "", msg.subject || "", msg.status || "sent");
       appendMessage("assistant", html);
     }
   }
@@ -600,9 +604,12 @@ async function sendMessage(overrideText) {
   // Clear the attachment now (consumed by this message)
   if (fileCtx) removeAttachment();
 
-  // Get the current session for history re-seeding
+  // Get the current session for history re-seeding.
+  // Filter out email outcome messages — they have no content and are UI-only.
   const session = getSession(activeSessionId);
-  const history = session ? session.messages : [];
+  const history = session
+    ? session.messages.filter(m => m.role === "user" || m.role === "assistant")
+    : [];
 
   // Build follow-up suffix if enabled
   let followupSuffix = "";
@@ -617,6 +624,7 @@ async function sendMessage(overrideText) {
   let started = false;
   let sources = [];
   let tokenCount = 0;
+  let emailActionDetected = false; // true once EMAIL_ACTION: appears in the stream
 
   _log.time(`stream session=${activeSessionId}`);
 
@@ -685,9 +693,22 @@ async function sendMessage(overrideText) {
             }
             tokenCount++;
             fullText += chunk.textResponse;
-            const { mainText } = parseFollowUpQuestions(fullText);
-            bubble.innerHTML = parseMarkdown(mainText);
-            chatWindow.scrollTop = chatWindow.scrollHeight;
+
+            if (emailActionDetected) {
+              // Already in email mode — just accumulate, don't touch the bubble
+            } else if (fullText.includes(EMAIL_ACTION_DELIMITER)) {
+              // EMAIL_ACTION: just appeared — wipe whatever was rendered and
+              // replace with the drafting indicator immediately
+              emailActionDetected = true;
+              _log.info("sendMessage: EMAIL_ACTION detected mid-stream — switching to drafting indicator");
+              bubble.innerHTML = `<span class="drafting-email-indicator"><span class="typing-indicator"><span></span><span></span><span></span></span><span class="drafting-email-label">Drafting email…</span></span>`;
+              chatWindow.scrollTop = chatWindow.scrollHeight;
+            } else {
+              // Normal render — only show text before any EMAIL_ACTION delimiter
+              const { mainText } = parseFollowUpQuestions(fullText);
+              bubble.innerHTML = parseMarkdown(mainText);
+              chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
           }
 
           if (chunk.sources && chunk.sources.length > 0) {
@@ -724,22 +745,31 @@ async function sendMessage(overrideText) {
     _log.timeEnd(`stream session=${activeSessionId}`);
     _log.info(`sendMessage: stream complete — ${tokenCount} token chunks, ${sources.length} source(s), response=${fullText.length} chars`);
 
-    // Final render with follow-up question extraction
-    const { mainText, questions } = parseFollowUpQuestions(fullText);
+    // Final render — extract email action first, then follow-up questions
+    const { mainText: textAfterEmail, emailData } = parseEmailAction(fullText);
+    const { mainText, questions } = parseFollowUpQuestions(textAfterEmail);
 
-    if (questions.length > 0) {
-      _log.debug(`sendMessage: parsed ${questions.length} follow-up question(s)`);
-    }
-
-    if (sources.length > 0) {
-      bubble.innerHTML = parseMarkdown(mainText) + buildCitations(sources);
+    if (emailData) {
+      // Remove the drafting-indicator bubble entirely — the modal replaces it
+      bubble.remove();
+      _log.info("sendMessage: email action parsed — opening confirmation modal");
+      showEmailConfirmModal(emailData);
     } else {
-      bubble.innerHTML = parseMarkdown(mainText);
-    }
+      // Normal render
+      if (questions.length > 0) {
+        _log.debug(`sendMessage: parsed ${questions.length} follow-up question(s)`);
+      }
 
-    if (settings.followup_enabled && questions.length > 0) {
-      const chips = buildFollowUpChips(questions);
-      if (chips) chatWindow.appendChild(chips);
+      if (sources.length > 0) {
+        bubble.innerHTML = parseMarkdown(mainText) + buildCitations(sources);
+      } else {
+        bubble.innerHTML = parseMarkdown(mainText);
+      }
+
+      if (settings.followup_enabled && questions.length > 0) {
+        const chips = buildFollowUpChips(questions);
+        if (chips) chatWindow.appendChild(chips);
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -762,11 +792,15 @@ async function sendMessage(overrideText) {
     const userMsg = { role: "user", content: text };
     if (fileCtx) userMsg.filename = fileCtx.filename;
     currentSession.messages.push(userMsg);
-    currentSession.messages.push({
-      role: "assistant",
-      content: mainText,
-      sources: sources.length > 0 ? sources : undefined,
-    });
+    // Email responses are persisted by _persistEmailMessage after modal outcome;
+    // only save a regular assistant message when there is no email action.
+    if (!emailData) {
+      currentSession.messages.push({
+        role: "assistant",
+        content: mainText,
+        sources: sources.length > 0 ? sources : undefined,
+      });
+    }
 
     upsertSession(currentSession);
     _log.debug(`sendMessage: session saved — total messages=${currentSession.messages.length}`);
@@ -959,6 +993,228 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// ---------------------------------------------------------------------------
+// Email action — detection, confirmation modal, and sending
+// ---------------------------------------------------------------------------
+
+// Delimiter the LLM uses to signal an email action block.
+const EMAIL_ACTION_DELIMITER = "EMAIL_ACTION:";
+
+/**
+ * Scan the full LLM response for an EMAIL_ACTION block.
+ * The block is expected at the very start of the response (before any text).
+ * Everything from EMAIL_ACTION: onward is stripped from mainText.
+ *
+ * Returns { mainText, emailData } where emailData is null if not found.
+ */
+function parseEmailAction(fullText) {
+  const idx = fullText.indexOf(EMAIL_ACTION_DELIMITER);
+  if (idx === -1) return { mainText: fullText, emailData: null };
+
+  const mainText = fullText.slice(0, idx).trimEnd();
+  const jsonBlock = fullText.slice(idx + EMAIL_ACTION_DELIMITER.length).trim();
+
+  // Grab everything from the first { to the last } — handles multi-line LLM output
+  const start = jsonBlock.indexOf("{");
+  const end   = jsonBlock.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    _log.warn("parseEmailAction: EMAIL_ACTION delimiter found but no valid JSON block");
+    return { mainText: fullText, emailData: null };
+  }
+
+  let raw = jsonBlock.slice(start, end + 1);
+
+  // LLMs frequently emit literal newlines inside JSON string values, which is
+  // invalid JSON. Replace any bare CR/LF that are NOT already escaped with \n.
+  // Strategy: walk the string and only replace newlines that appear inside a
+  // JSON string value (i.e. while inString === true).
+  let sanitized = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) {
+      sanitized += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      sanitized += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      sanitized += ch;
+      continue;
+    }
+    if (inString && (ch === "\n" || ch === "\r")) {
+      // Replace bare newline with escaped version
+      sanitized += ch === "\n" ? "\\n" : "\\r";
+      continue;
+    }
+    sanitized += ch;
+  }
+
+  try {
+    const emailData = JSON.parse(sanitized);
+    _log.info("parseEmailAction: email action detected", emailData);
+    return { mainText, emailData };
+  } catch (err) {
+    _log.warn("parseEmailAction: failed to parse email JSON:", err, sanitized.slice(0, 200));
+    return { mainText: fullText, emailData: null };
+  }
+}
+
+// Holds the email data and session context while the modal is open
+let _pendingEmail = null; // { emailData, sessionId }
+
+/**
+ * Build the HTML for an email summary bubble (used live and on history restore).
+ * status: "sent" | "cancelled"
+ */
+function buildEmailBubbleHtml(to, subject, status) {
+  const icon = status === "sent"
+    ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 12 4 12"/><polyline points="4 12 9 18 20 6"/></svg>`
+    : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  const label = status === "sent" ? "Email sent" : "Email cancelled";
+  const cls   = status === "sent" ? "email-bubble-sent" : "email-bubble-cancelled";
+  return `<span class="email-bubble ${cls}">${icon}<span class="email-bubble-label">${label}</span><span class="email-bubble-detail">To: ${escapeHtml(to)} &mdash; <em>${escapeHtml(subject)}</em></span></span>`;
+}
+
+/**
+ * Persist an email outcome message to the active session in localStorage.
+ */
+function _persistEmailMessage(sessionId, to, subject, status) {
+  const session = getSession(sessionId);
+  if (!session) return;
+  session.messages.push({
+    role: "email",
+    to,
+    subject,
+    status, // "sent" | "cancelled"
+  });
+  upsertSession(session);
+  renderSessionList();
+}
+
+/**
+ * Open the email confirmation modal pre-filled with LLM-drafted values.
+ * The user can edit all fields before confirming.
+ */
+function showEmailConfirmModal(emailData) {
+  const modal = document.getElementById("email-confirm-modal");
+  if (!modal) {
+    _log.error("showEmailConfirmModal: #email-confirm-modal not found in DOM");
+    return;
+  }
+
+  // Capture context so cancel/confirm can write to the right session
+  _pendingEmail = { emailData, sessionId: activeSessionId };
+
+  // Pre-fill fields
+  document.getElementById("email-to").value      = emailData.to      || "";
+  document.getElementById("email-subject").value = emailData.subject || "";
+  document.getElementById("email-body").value    = emailData.body    || "";
+  document.getElementById("email-from").value    = emailData.from    || "noreply@uri.edu";
+
+  // Clear any previous status
+  const statusEl = document.getElementById("email-modal-status");
+  statusEl.textContent = "";
+  statusEl.className = "email-modal-status";
+
+  // Reset buttons
+  document.getElementById("email-send-btn").disabled = false;
+  document.getElementById("email-send-btn").textContent = "Send Email";
+
+  modal.classList.add("modal-visible");
+  _log.info("showEmailConfirmModal: modal opened");
+}
+
+function closeEmailConfirmModal() {
+  const modal = document.getElementById("email-confirm-modal");
+  if (!modal) return;
+  modal.classList.remove("modal-visible");
+
+  // If modal was closed without sending, record a cancellation
+  if (_pendingEmail) {
+    const { emailData, sessionId } = _pendingEmail;
+    const to      = document.getElementById("email-to").value.trim()      || emailData.to      || "";
+    const subject = document.getElementById("email-subject").value.trim() || emailData.subject || "";
+    _pendingEmail = null;
+
+    const html = buildEmailBubbleHtml(to, subject, "cancelled");
+    appendMessage("assistant", html);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    _persistEmailMessage(sessionId, to, subject, "cancelled");
+    _log.info("closeEmailConfirmModal: email cancelled");
+  }
+}
+
+async function confirmSendEmail() {
+  const to      = document.getElementById("email-to").value.trim();
+  const subject = document.getElementById("email-subject").value.trim();
+  const body    = document.getElementById("email-body").value.trim();
+  const from    = document.getElementById("email-from").value.trim();
+  const statusEl = document.getElementById("email-modal-status");
+  const sendBtn  = document.getElementById("email-send-btn");
+
+  if (!to || !subject || !body) {
+    statusEl.textContent = "Please fill in all required fields.";
+    statusEl.className = "email-modal-status error";
+    return;
+  }
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = "Sending…";
+  statusEl.textContent = "";
+  statusEl.className = "email-modal-status";
+
+  _log.info(`confirmSendEmail: sending to='${to}' subject='${subject}'`);
+
+  try {
+    const res = await fetch("/api/send-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to, subject, body, from_addr: from }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.detail || `Server error ${res.status}`);
+    }
+
+    _log.info("confirmSendEmail: success —", data.message);
+    statusEl.textContent = "✓ " + (data.message || "Email sent successfully.");
+    statusEl.className = "email-modal-status success";
+    sendBtn.textContent = "Sent";
+
+    // Capture session before clearing _pendingEmail
+    const sessionId = _pendingEmail ? _pendingEmail.sessionId : activeSessionId;
+    _pendingEmail = null; // clear before closeEmailConfirmModal so it won't fire cancel
+
+    // Auto-close after a short delay
+    setTimeout(() => {
+      const modal = document.getElementById("email-confirm-modal");
+      if (modal) modal.classList.remove("modal-visible");
+    }, 2000);
+
+    // Append confirmation bubble to the chat
+    const html = buildEmailBubbleHtml(to, subject, "sent");
+    appendMessage("assistant", html);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    _persistEmailMessage(sessionId, to, subject, "sent");
+
+  } catch (err) {
+    _log.error("confirmSendEmail: failed:", err);
+    statusEl.textContent = err.message || "Failed to send email.";
+    statusEl.className = "email-modal-status error";
+    sendBtn.disabled = false;
+    sendBtn.textContent = "Send Email";
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,9 @@ class Workspace(Base):
     followup_enabled = Column(Boolean, nullable=False, default=False)
     followup_count = Column(Integer, nullable=False, default=3)
 
+    # Email skill — when enabled, the email prompt suffix is injected into every request
+    email_enabled = Column(Boolean, nullable=False, default=False)
+
     # Default questions: stored as JSON list of {category, questions[]} objects
     # e.g. [{"category": "Getting Started", "questions": ["What can you help me with?"]}]
     default_questions = Column(JSON, nullable=False, default=list)
