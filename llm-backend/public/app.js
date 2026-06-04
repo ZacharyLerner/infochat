@@ -68,6 +68,11 @@ const queryRewrittenText= document.getElementById('query-rewritten-text');
 const globalSettingsForm = document.getElementById('global-settings-form');
 const globalSettingsMsg  = document.getElementById('global-settings-msg');
 
+const logEntries    = document.getElementById('log-entries');
+const logEmpty      = document.getElementById('log-empty');
+const logCount      = document.getElementById('log-count');
+const clearLogBtn   = document.getElementById('clear-log-btn');
+
 // =====================================================
 // HELPERS
 // =====================================================
@@ -198,6 +203,9 @@ tabBtns.forEach(btn => {
     tabPanels.forEach(p => p.classList.add('hidden'));
     btn.classList.add('active');
     document.getElementById(btn.dataset.tab).classList.remove('hidden');
+    if (btn.dataset.tab === 'ws-log' && currentWorkspaceSlug) {
+      loadQueryLog(currentWorkspaceSlug);
+    }
   });
 });
 
@@ -306,10 +314,43 @@ backToWorkspaces.addEventListener('click', () => {
 // =====================================================
 
 async function loadWorkspaceSettings(slug) {
-  const res = await apiFetch(`/workspace/${slug}`);
-  if (!res.ok) return;
-  const ws = await res.json();
+  const [wsRes, defaultsRes] = await Promise.all([
+    apiFetch(`/workspace/${slug}`),
+    apiFetch('/defaults'),
+  ]);
+  if (!wsRes.ok) return;
+  const ws = await wsRes.json();
   fillForm(workspaceSettingsForm, ws);
+
+  let defaults = null;
+  if (defaultsRes.ok) {
+    defaults = await defaultsRes.json();
+    workspaceSettingsForm._promptDefaults = defaults;
+
+    // Fill blank prompts with built-in defaults
+    const spEl = workspaceSettingsForm.elements['system_prompt'];
+    const webEnabled = workspaceSettingsForm.elements['searxng_enabled'].checked;
+    if (spEl && !spEl.value) {
+      spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
+    }
+    const rpEl = workspaceSettingsForm.elements['rewrite_prompt'];
+    if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
+  }
+
+  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
+  if (!workspaceSettingsForm._toggleListenerAttached) {
+    workspaceSettingsForm._toggleListenerAttached = true;
+    workspaceSettingsForm.elements['searxng_enabled'].addEventListener('change', function () {
+      const d = workspaceSettingsForm._promptDefaults;
+      if (!d) return;
+      const spEl = workspaceSettingsForm.elements['system_prompt'];
+      if (!spEl) return;
+      const cur = spEl.value;
+      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
+        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
+      }
+    });
+  }
 }
 
 workspaceSettingsForm.addEventListener('submit', async (e) => {
@@ -317,9 +358,9 @@ workspaceSettingsForm.addEventListener('submit', async (e) => {
   const data = formToObj(workspaceSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'system_prompt', 'embed_api_key', 'max_tokens',
-    'rewrite_model', 'rewrite_prompt',
+    'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens', 'searxng_num_results']);
   data.searxng_enabled = workspaceSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(wsSettingsMsg, 'Saving...');
@@ -346,11 +387,47 @@ newWorkspaceBtn.addEventListener('click', async () => {
   createWorkspaceMsg.textContent = '';
   createModal.classList.remove('hidden');
 
-  // Pre-fill with current global defaults so the admin sees what will be used
-  const res = await apiFetch('/settings');
-  if (res.ok) {
-    const settings = await res.json();
+  // Fetch global settings and built-in defaults in parallel
+  const [settingsRes, defaultsRes] = await Promise.all([
+    apiFetch('/settings'),
+    apiFetch('/defaults'),
+  ]);
+
+  let defaults = null;
+  if (defaultsRes.ok) {
+    defaults = await defaultsRes.json();
+    createWorkspaceForm._promptDefaults = defaults;
+  }
+
+  if (settingsRes.ok) {
+    const settings = await settingsRes.json();
     fillForm(createWorkspaceForm, settings);
+
+    // Fill blank prompts with built-in defaults
+    if (defaults) {
+      const spEl = createWorkspaceForm.elements['system_prompt'];
+      const webEnabled = createWorkspaceForm.elements['searxng_enabled'].checked;
+      if (spEl && !spEl.value) {
+        spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
+      }
+      const rpEl = createWorkspaceForm.elements['rewrite_prompt'];
+      if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
+    }
+  }
+
+  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
+  if (!createWorkspaceForm._toggleListenerAttached) {
+    createWorkspaceForm._toggleListenerAttached = true;
+    createWorkspaceForm.elements['searxng_enabled'].addEventListener('change', function () {
+      const d = createWorkspaceForm._promptDefaults;
+      if (!d) return;
+      const spEl = createWorkspaceForm.elements['system_prompt'];
+      if (!spEl) return;
+      const cur = spEl.value;
+      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
+        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
+      }
+    });
   }
 });
 
@@ -368,9 +445,9 @@ createWorkspaceForm.addEventListener('submit', async (e) => {
     'name', 'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
     'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
-    'rewrite_model', 'rewrite_prompt',
+    'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens', 'searxng_num_results']);
   data.searxng_enabled = createWorkspaceForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(createWorkspaceMsg, 'Creating...');
@@ -580,6 +657,11 @@ queryForm.addEventListener('submit', async (e) => {
     activeStreamController = null;
     querySubmitBtn.disabled = false;
     querySubmitBtn.textContent = 'Ask';
+    // Refresh log tab if it's currently visible
+    const logTab = document.getElementById('ws-log');
+    if (logTab && !logTab.classList.contains('hidden') && currentWorkspaceSlug) {
+      loadQueryLog(currentWorkspaceSlug);
+    }
   }
 });
 
@@ -654,14 +736,158 @@ function renderSources(sources) {
 }
 
 // =====================================================
+// QUERY LOG
+// =====================================================
+
+async function loadQueryLog(slug) {
+  const res = await apiFetch(`/workspace/${slug}/logs`);
+  if (!res.ok) return;
+  const entries = await res.json();
+  renderQueryLog(entries);
+}
+
+function renderQueryLog(entries) {
+  logEntries.innerHTML = '';
+
+  if (!entries.length) {
+    logEmpty.classList.remove('hidden');
+    logCount.textContent = '';
+    return;
+  }
+
+  logEmpty.classList.add('hidden');
+  logCount.textContent = `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`;
+
+  entries.forEach(entry => {
+    const card = document.createElement('div');
+    card.className = 'log-entry';
+
+    // Format timestamp
+    const ts = entry.timestamp ? new Date(entry.timestamp) : null;
+    const tsStr = ts ? ts.toLocaleString() : '—';
+    const durStr = entry.duration_ms != null ? `${(entry.duration_ms / 1000).toFixed(1)}s` : '';
+
+    // Header (always visible, clickable to expand)
+    const header = document.createElement('div');
+    header.className = 'log-entry-header';
+    const rewroteNote = (entry.rewritten_query && entry.rewritten_query !== entry.question)
+      ? `<div class="log-entry-rewritten-preview">&rarr; ${escHtml(entry.rewritten_query)}</div>`
+      : '';
+    header.innerHTML = `
+      <div class="log-entry-left">
+        <div class="log-entry-question">${escHtml(entry.question || '')}</div>
+        ${rewroteNote}
+      </div>
+      <div class="log-entry-meta">
+        <span>${escHtml(tsStr)}</span>
+        ${durStr ? `<span class="log-duration-badge">${escHtml(durStr)}</span>` : ''}
+      </div>
+    `;
+
+    // Body (hidden by default)
+    const body = document.createElement('div');
+    body.className = 'log-entry-body hidden';
+
+    // Rewritten query (show whenever present)
+    if (entry.rewritten_query) {
+      const rw = document.createElement('div');
+      rw.innerHTML = `<div class="log-section-label">Rewritten Query</div>
+        <div class="log-rewritten">${escHtml(entry.rewritten_query)}</div>`;
+      body.appendChild(rw);
+    }
+
+    // Answer
+    const answerDiv = document.createElement('div');
+    answerDiv.innerHTML = `<div class="log-section-label">Answer</div>
+      <div class="log-answer">${escHtml(entry.answer || '')}</div>`;
+    body.appendChild(answerDiv);
+
+    // Document sources
+    const docs = (entry.sources && entry.sources.documents) || [];
+    if (docs.length) {
+      const docsDiv = document.createElement('div');
+      const chips = docs.map(d =>
+        `<span class="log-source-chip">${escHtml(d.filename || 'Unknown')}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
+      ).join('');
+      docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
+        <div class="log-source-chips">${chips}</div>`;
+      body.appendChild(docsDiv);
+    }
+
+    // Web sources
+    const web = (entry.sources && entry.sources.web) || [];
+    if (web.length) {
+      const webDiv = document.createElement('div');
+      const links = web.map(r =>
+        `<a class="log-web-link" href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer">${escHtml(r.title || r.url || 'Web result')}</a>`
+      ).join('');
+      webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
+        <div class="log-web-links">${links}</div>`;
+      body.appendChild(webDiv);
+    }
+
+    // Toggle expand/collapse on header click
+    header.addEventListener('click', () => {
+      body.classList.toggle('hidden');
+    });
+
+    card.appendChild(header);
+    card.appendChild(body);
+    logEntries.appendChild(card);
+  });
+}
+
+clearLogBtn.addEventListener('click', async () => {
+  if (!currentWorkspaceSlug) return;
+  if (!confirm('Clear all log entries for this workspace? This cannot be undone.')) return;
+  const res = await apiFetch(`/workspace/${currentWorkspaceSlug}/logs`, { method: 'DELETE' });
+  if (res.ok || res.status === 204) {
+    renderQueryLog([]);
+  }
+});
+
+// =====================================================
 // GLOBAL SETTINGS
 // =====================================================
 
 async function loadGlobalSettings() {
-  const res = await apiFetch('/settings');
-  if (!res.ok) return;
-  const settings = await res.json();
+  const [settingsRes, defaultsRes] = await Promise.all([
+    apiFetch('/settings'),
+    apiFetch('/defaults'),
+  ]);
+  if (!settingsRes.ok) return;
+  const settings = await settingsRes.json();
   fillForm(globalSettingsForm, settings);
+
+  let defaults = null;
+  if (defaultsRes.ok) {
+    defaults = await defaultsRes.json();
+    globalSettingsForm._promptDefaults = defaults;
+
+    // Fill blank prompts with built-in defaults
+    const spEl = globalSettingsForm.elements['system_prompt'];
+    const webEnabled = globalSettingsForm.elements['searxng_enabled'].checked;
+    if (spEl && !spEl.value) {
+      spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
+    }
+    const rpEl = globalSettingsForm.elements['rewrite_prompt'];
+    if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
+  }
+
+  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
+  if (!globalSettingsForm._toggleListenerAttached) {
+    globalSettingsForm._toggleListenerAttached = true;
+    globalSettingsForm.elements['searxng_enabled'].addEventListener('change', function () {
+      const d = globalSettingsForm._promptDefaults;
+      if (!d) return;
+      const spEl = globalSettingsForm.elements['system_prompt'];
+      if (!spEl) return;
+      const cur = spEl.value;
+      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
+        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
+      }
+    });
+  }
 }
 
 globalSettingsForm.addEventListener('submit', async (e) => {
@@ -670,9 +896,9 @@ globalSettingsForm.addEventListener('submit', async (e) => {
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
     'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
-    'rewrite_model', 'rewrite_prompt',
+    'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens', 'searxng_num_results']);
   data.searxng_enabled = globalSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(globalSettingsMsg, 'Saving...');
@@ -706,8 +932,9 @@ function fillForm(form, obj) {
   });
 }
 
-// Fields that should always be included even when empty (to allow clearing them)
-const _ALWAYS_INCLUDE = new Set(['rewrite_model', 'rewrite_prompt']);
+// Fields that should always be included even when empty (to allow clearing them
+// back to the built-in default at runtime)
+const _ALWAYS_INCLUDE = new Set(['rewrite_model', 'rewrite_prompt', 'system_prompt', 'searxng_query_suffix']);
 
 function formToObj(form, fields) {
   const obj = {};

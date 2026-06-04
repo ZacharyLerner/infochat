@@ -15,24 +15,9 @@ The rewrite prompt is configurable per-workspace (stored in the DB as
 import asyncio
 import logging
 
-logger = logging.getLogger(__name__)
+from prompts import DEFAULT_REWRITE_PROMPT  # noqa: F401 — re-exported for callers
 
-# ---------------------------------------------------------------------------
-# Built-in default rewrite prompt — used when workspace.rewrite_prompt is blank.
-# Stored here (not in the DB) so it is always available as a fallback and can
-# be viewed / overridden in the admin panel.
-# ---------------------------------------------------------------------------
-DEFAULT_REWRITE_PROMPT = (
-    "You are a search query optimizer. "
-    "Given a user's question — and optionally recent conversation context — "
-    "rewrite it into a single, specific, self-contained search query that "
-    "performs well for both semantic document retrieval and web search.\n\n"
-    "Rules:\n"
-    "- Output ONLY the rewritten query. No explanation, no quotes, no extra punctuation.\n"
-    "- Resolve pronouns and vague references using the conversation context if provided.\n"
-    "- Expand abbreviations. Be specific and concrete but concise.\n"
-    "- If the query is already clear and specific, return it unchanged."
-)
+logger = logging.getLogger(__name__)
 
 
 def _sync_rewrite(
@@ -84,6 +69,15 @@ def _sync_rewrite(
 
         if not rewritten:
             logger.warning("Rewrite model returned empty response for query %r", original[:80])
+            return original
+
+        # If the model returned multiple lines it went off-script (asked a
+        # clarifying question, added explanation, etc.) — fall back to original.
+        if "\n" in rewritten:
+            logger.warning(
+                "Rewrite model returned multi-line response for query %r — using original",
+                original[:80],
+            )
             return original
 
         return rewritten

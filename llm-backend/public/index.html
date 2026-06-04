@@ -80,6 +80,7 @@
           <button class="tab-btn active" data-tab="ws-settings">Settings</button>
           <button class="tab-btn" data-tab="ws-documents">Documents</button>
           <button class="tab-btn" data-tab="ws-query">Query</button>
+          <button class="tab-btn" data-tab="ws-log">Log</button>
         </div>
 
         <!-- Tab: Settings -->
@@ -138,6 +139,14 @@
                 <span>Augment queries with live web results</span>
               </label>
             </div>
+            <div class="form-row">
+              <label>Web Results per Query <span class="muted">(1–10)</span></label>
+              <input type="number" name="searxng_num_results" min="1" max="10" />
+            </div>
+            <div class="form-row">
+              <label>Search Query Suffix <span class="muted">(web only)</span></label>
+              <input type="text" name="searxng_query_suffix" placeholder="e.g. site:uri.edu" />
+            </div>
 
             <div class="form-section-divider">Query Rewriting</div>
             <div class="form-row">
@@ -145,8 +154,8 @@
               <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
             </div>
             <div class="form-row full-width">
-              <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
-              <textarea name="rewrite_prompt" rows="6" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+              <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
+              <textarea name="rewrite_prompt" rows="6"></textarea>
             </div>
 
             <div class="form-actions">
@@ -216,6 +225,16 @@
             </div>
           </div>
         </div>
+
+        <!-- Tab: Log -->
+        <div id="ws-log" class="tab-panel hidden">
+          <div class="log-toolbar">
+            <span id="log-count" class="muted"></span>
+            <button id="clear-log-btn" class="btn-secondary">Clear Log</button>
+          </div>
+          <p id="log-empty" class="muted hidden">No queries logged yet.</p>
+          <div id="log-entries"></div>
+        </div>
       </section>
 
       <!-- CREATE WORKSPACE MODAL BACKDROP -->
@@ -232,7 +251,7 @@
             </div>
             <div class="form-row">
               <label>LLM Model</label>
-              <input type="text" name="llm_model" placeholder="Leave blank to use global default" />
+              <input type="text" name="llm_model" placeholder="e.g. openai/gpt-4o" />
             </div>
             <div class="form-row">
               <label>API Key</label>
@@ -240,7 +259,7 @@
             </div>
             <div class="form-row">
               <label>Temperature</label>
-              <input type="number" name="temperature" step="0.01" min="0" max="1" placeholder="e.g. 0.7" />
+              <input type="number" name="temperature" step="0.01" min="0" max="1" />
             </div>
             <div class="form-row">
               <label>Top N Chunks</label>
@@ -252,19 +271,19 @@
             </div>
             <div class="form-row">
               <label>Max Tokens</label>
-              <input type="number" name="max_tokens" min="1" placeholder="e.g. 1024" />
+              <input type="number" name="max_tokens" min="1" />
             </div>
             <div class="form-row">
               <label>Chunk Size <span class="muted">(locked after creation)</span></label>
-              <input type="number" name="chunk_size" placeholder="e.g. 1024" />
+              <input type="number" name="chunk_size" />
             </div>
             <div class="form-row">
               <label>Chunk Overlap <span class="muted">(locked after creation)</span></label>
-              <input type="number" name="chunk_overlap" placeholder="e.g. 104" />
+              <input type="number" name="chunk_overlap" />
             </div>
             <div class="form-row">
               <label>Embed Model <span class="muted">(locked after creation)</span></label>
-              <input type="text" name="embed_model" placeholder="Leave blank to use global default" />
+              <input type="text" name="embed_model" placeholder="e.g. text-embedding-3-small" />
             </div>
             <div class="form-row">
               <label>Embed API Key</label>
@@ -272,7 +291,7 @@
             </div>
             <div class="form-row full-width">
               <label>System Prompt</label>
-              <textarea name="system_prompt" rows="3" placeholder="Leave blank to use global default"></textarea>
+              <textarea name="system_prompt" rows="4"></textarea>
             </div>
 
             <div class="form-section-divider">Web Search</div>
@@ -283,6 +302,14 @@
                 <span>Augment queries with live web results</span>
               </label>
             </div>
+            <div class="form-row">
+              <label>Web Results per Query <span class="muted">(1–10)</span></label>
+              <input type="number" name="searxng_num_results" min="1" max="10" />
+            </div>
+            <div class="form-row">
+              <label>Search Query Suffix <span class="muted">(web only)</span></label>
+              <input type="text" name="searxng_query_suffix" placeholder="e.g. site:uri.edu" />
+            </div>
 
             <div class="form-section-divider">Query Rewriting</div>
             <div class="form-row">
@@ -290,8 +317,8 @@
               <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
             </div>
             <div class="form-row full-width">
-              <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
-              <textarea name="rewrite_prompt" rows="4" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+              <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
+              <textarea name="rewrite_prompt" rows="4"></textarea>
             </div>
 
             <div class="form-actions">
@@ -361,6 +388,14 @@
               <span>Augment queries with live web results</span>
             </label>
           </div>
+          <div class="form-row">
+            <label>Web Results per Query <span class="muted">(1–10)</span></label>
+            <input type="number" name="searxng_num_results" min="1" max="10" />
+          </div>
+          <div class="form-row">
+            <label>Search Query Suffix <span class="muted">(web only)</span></label>
+            <input type="text" name="searxng_query_suffix" placeholder="e.g. site:uri.edu" />
+          </div>
 
           <div class="form-section-divider">Query Rewriting</div>
           <div class="form-row">
@@ -368,8 +403,8 @@
             <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
           </div>
           <div class="form-row full-width">
-            <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
-            <textarea name="rewrite_prompt" rows="6" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+            <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
+            <textarea name="rewrite_prompt" rows="6"></textarea>
           </div>
 
           <div class="form-actions">

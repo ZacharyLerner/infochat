@@ -18,10 +18,12 @@ _httpx_logger = _logging.getLogger("httpx")
 _httpx_logger.setLevel(_logging.WARNING)
 # ─────────────────────────────────────────────────────────────────────────────
 
+import datetime
 import json
 import os
 import tempfile
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,6 +43,52 @@ import query
 # --- Doc tracking (JSON file) ------------------------------------------------
 DOCS_FILE = Path("docs.json")
 _docs_lock = threading.Lock()
+
+# --- Query log (per-workspace JSON files in logs/) ---------------------------
+LOGS_DIR = Path("logs")
+_logs_lock = threading.Lock()
+
+
+def _log_path(slug: str) -> Path:
+    return LOGS_DIR / f"{slug}.json"
+
+
+def _read_log(slug: str) -> list:
+    """Read log entries for a workspace. Caller must hold _logs_lock."""
+    path = _log_path(slug)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _append_log(slug: str, entry: dict) -> None:
+    """Append a single log entry atomically. Safe to call from a thread."""
+    with _logs_lock:
+        LOGS_DIR.mkdir(exist_ok=True)
+        data = _read_log(slug)
+        data.append(entry)
+        text = json.dumps(data, indent=2)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=LOGS_DIR, suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                f.write(text)
+            try:
+                os.replace(tmp_path, _log_path(slug))
+            except OSError:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                _log_path(slug).write_text(text)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _read_docs() -> Dict[str, Any]:
@@ -88,6 +136,7 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(db.init_db)
     if not await asyncio.to_thread(DOCS_FILE.exists):
         await asyncio.to_thread(_write_docs, {})
+    LOGS_DIR.mkdir(exist_ok=True)
     yield
 
 
@@ -133,6 +182,8 @@ class CreateWorkspace(BaseModel):
     embed_api_key: Optional[str] = Field(None, description="API key for the embedding model. Only needed when using a direct-openai/ embedding model that requires its own key separate from the LLM gateway key.")
     max_tokens: Optional[int] = Field(None, description="Maximum number of tokens the LLM may generate in a single response.")
     searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation for every query in this workspace.")
+    searxng_num_results: Optional[int] = Field(None, description="Number of web search results to fetch per query (1–10).")
+    searxng_query_suffix: Optional[str] = Field(None, description="Text appended to every web search query (e.g. 'site:uri.edu'). Does not affect vector retrieval.")
     rewrite_model: Optional[str] = Field(None, description="LiteLLM model string for query rewriting (e.g. 'openai/gpt-4o-mini'). Leave blank to disable rewriting.")
     rewrite_prompt: Optional[str] = Field(None, description="System prompt for the query rewriter. Leave blank to use the built-in default.")
 
@@ -149,6 +200,8 @@ class UpdateWorkspace(BaseModel):
     embed_api_key: Optional[str] = Field(None)
     max_tokens: Optional[int] = Field(None)
     searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation.")
+    searxng_num_results: Optional[int] = Field(None, description="Number of web search results to fetch per query (1–10).")
+    searxng_query_suffix: Optional[str] = Field(None, description="Text appended to every web search query (e.g. 'site:uri.edu'). Does not affect vector retrieval.")
     rewrite_model: Optional[str] = Field(None, description="Model for query rewriting. Empty string disables rewriting.")
     rewrite_prompt: Optional[str] = Field(None, description="Custom rewrite prompt. Empty string uses built-in default.")
 
@@ -172,6 +225,8 @@ class UpdateSettings(BaseModel):
     embed_api_key: Optional[str] = None
     max_tokens: Optional[int] = None
     searxng_enabled: Optional[bool] = None
+    searxng_num_results: Optional[int] = None
+    searxng_query_suffix: Optional[str] = None
     rewrite_model: Optional[str] = None
     rewrite_prompt: Optional[str] = None
 
@@ -187,7 +242,21 @@ def update_settings(body: UpdateSettings):
     # Cast bool → int for SQLite INTEGER column
     if fields.get("searxng_enabled") is not None:
         fields["searxng_enabled"] = int(fields["searxng_enabled"])
+    # Clamp num_results to 1–10
+    if fields.get("searxng_num_results") is not None:
+        fields["searxng_num_results"] = max(1, min(int(fields["searxng_num_results"]), 10))
     return db.update_settings(**fields)
+
+
+@app.get("/defaults", summary="Get built-in default prompt values")
+def get_defaults():
+    """Return the hardcoded default prompts so the frontend can pre-fill forms."""
+    from prompts import DEFAULT_SYSTEM_PROMPT_RAG, DEFAULT_SYSTEM_PROMPT_WEB, DEFAULT_REWRITE_PROMPT
+    return {
+        "default_system_prompt_rag": DEFAULT_SYSTEM_PROMPT_RAG,
+        "default_system_prompt_web": DEFAULT_SYSTEM_PROMPT_WEB,
+        "default_rewrite_prompt": DEFAULT_REWRITE_PROMPT,
+    }
 
 
 # --- Workspace CRUD ----------------------------------------------------------
@@ -213,6 +282,8 @@ def create_workspace(body: CreateWorkspace):
         embed_api_key=body.embed_api_key or "",
         max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
         searxng_enabled=int(body.searxng_enabled) if body.searxng_enabled is not None else 0,
+        searxng_num_results=min(int(body.searxng_num_results), 10) if body.searxng_num_results is not None else 3,
+        searxng_query_suffix=body.searxng_query_suffix or "",
         rewrite_model=body.rewrite_model or "",
         rewrite_prompt=body.rewrite_prompt or "",
     )
@@ -274,6 +345,14 @@ async def delete_workspace(slug: str):
             data.pop(slug, None)
             _write_docs(data)
     await asyncio.to_thread(_remove_docs)
+
+    # Remove query log file for this workspace
+    def _remove_log():
+        with _logs_lock:
+            p = _log_path(slug)
+            if p.exists():
+                p.unlink()
+    await asyncio.to_thread(_remove_log)
 
     await asyncio.to_thread(db.delete_workspace, slug)
     manager.on_workspace_deleted(slug=slug)  # fire-and-forget background thread
@@ -363,11 +442,24 @@ async def delete_embed(slug: str, doc_id: str):
 # --- Query -------------------------------------------------------------------
 @app.post("/workspace/{slug}/query", summary="Query a workspace")
 async def query_workspace(slug: str, body: QueryRequest):
-    import asyncio
+    import asyncio, time as _time
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    return await asyncio.to_thread(query.query_workspace, ws, body.question)
+    start = _time.time()
+    result = await asyncio.to_thread(query.query_workspace, ws, body.question)
+    duration_ms = int((_time.time() - start) * 1000)
+    entry = {
+        "id": str(uuid.uuid4()),
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "question": body.question,
+        "rewritten_query": result.get("rewritten_query"),
+        "answer": result.get("answer", ""),
+        "sources": result.get("sources", {"documents": [], "web": []}),
+        "duration_ms": duration_ms,
+    }
+    await asyncio.to_thread(_append_log, slug, entry)
+    return result
 
 
 @app.post("/workspace/{slug}/query/stream", summary="Stream a query response")
@@ -376,8 +468,24 @@ async def stream_query_workspace(slug: str, body: QueryRequest):
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+
+    async def _logging_stream():
+        async for chunk in query.stream_query_workspace(
+            ws, body.question, prompt_suffix=body.prompt_suffix
+        ):
+            if chunk.startswith("event: log\n"):
+                # Intercept the log event — write to disk, don't forward to browser
+                try:
+                    data_line = chunk.split("data: ", 1)[1].strip()
+                    entry = json.loads(data_line)
+                    await asyncio.to_thread(_append_log, slug, entry)
+                except Exception:
+                    pass
+            else:
+                yield chunk
+
     return StreamingResponse(
-        query.stream_query_workspace(ws, body.question, prompt_suffix=body.prompt_suffix),
+        _logging_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -459,6 +567,26 @@ async def delete_chat_session(slug: str, session_id: str):
     should also remove it from localStorage."""
     with query._chat_sessions_lock:
         query._chat_sessions.pop(session_id, None)
+    return None
+
+
+# --- Query log endpoints -----------------------------------------------------
+
+@app.get("/workspace/{slug}/logs", summary="Get query log for a workspace")
+def get_logs(slug: str):
+    """Return all log entries for a workspace, newest first."""
+    with _logs_lock:
+        data = _read_log(slug)
+    return list(reversed(data))
+
+
+@app.delete("/workspace/{slug}/logs", status_code=204, summary="Clear query log for a workspace")
+def clear_logs(slug: str):
+    """Delete all log entries for a workspace."""
+    with _logs_lock:
+        p = _log_path(slug)
+        if p.exists():
+            p.unlink()
     return None
 
 

@@ -833,3 +833,150 @@ td code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* =====================================================
+   QUERY LOG
+   ===================================================== */
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.log-entry {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.log-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  gap: 16px;
+}
+
+.log-entry-header:hover {
+  background: var(--bg);
+}
+
+.log-entry-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-entry-question {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-entry-rewritten-preview {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.log-duration-badge {
+  font-size: 10px;
+  font-weight: 500;
+  background: var(--border-light);
+  border-radius: 3px;
+  padding: 1px 6px;
+  color: var(--text-muted);
+}
+
+.log-entry-body {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.log-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+
+.log-rewritten {
+  font-size: 12px;
+  font-family: var(--mono);
+  color: #4a5568;
+  background: #f2f4f6;
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  line-height: 1.5;
+}
+
+.log-answer {
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.log-source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.log-source-chip {
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.log-web-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-web-link {
+  font-size: 12px;
+  color: #1a5fa6;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-web-link:hover {
+  text-decoration: underline;
+}
