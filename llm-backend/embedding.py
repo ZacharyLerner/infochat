@@ -165,9 +165,11 @@ def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
         # chunks over the 2048-token context window of models like qwen3-embed-8b.
         doc.excluded_embed_metadata_keys = ["doc_id", "filename"]
 
-    # Cap chunk_size to 1900 tokens so metadata overhead never pushes a chunk
-    # over a 2048-token embedding model context window (e.g. qwen3-embed-8b).
-    chunk_size = min(ws["chunk_size"], 1900)
+    # Cap chunk_size to 1700 tokens. SentenceSplitter counts with tiktoken
+    # (cl100k), but qwen3-embed-8b uses its own tokenizer which produces
+    # higher counts for the same text — empirically up to ~10% more tokens.
+    # 1700 tiktoken tokens ≈ ≤1870 qwen3 tokens, safely under the 2048 limit.
+    chunk_size = min(ws["chunk_size"], 1700)
 
     # Chunk documents
     splitter = SentenceSplitter(
@@ -175,6 +177,14 @@ def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
         chunk_overlap=ws["chunk_overlap"],
     )
     nodes = splitter.get_nodes_from_documents(documents)
+
+    # Hard-truncate each node's text to 6000 characters as a final safety net
+    # against tokenizer variance (tiktoken vs qwen3 tokenizer disagreements).
+    # 6000 chars ≈ 1500 tokens on average — well under the 2048-token limit.
+    _MAX_CHUNK_CHARS = 6000
+    for node in nodes:
+        if len(node.get_content()) > _MAX_CHUNK_CHARS:
+            node.text = node.get_content()[:_MAX_CHUNK_CHARS]
 
     # Embed and store.
     # Acquire the per-workspace lock before touching LanceDB to prevent concurrent

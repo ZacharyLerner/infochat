@@ -62,6 +62,8 @@ const queryClearBtn     = document.getElementById('query-clear-btn');
 const queryResult       = document.getElementById('query-result');
 const queryAnswer       = document.getElementById('query-answer');
 const querySources      = document.getElementById('query-sources');
+const queryRewriteDebug = document.getElementById('query-rewrite-debug');
+const queryRewrittenText= document.getElementById('query-rewritten-text');
 
 const globalSettingsForm = document.getElementById('global-settings-form');
 const globalSettingsMsg  = document.getElementById('global-settings-msg');
@@ -284,6 +286,8 @@ function openWorkspace(slug, name) {
   queryAnswer.textContent = '';
   querySources.innerHTML = '';
   queryResult.classList.add('hidden');
+  queryRewriteDebug.classList.add('hidden');
+  queryRewrittenText.textContent = '';
   queryInput.value = '';
 
   showView('workspace-detail');
@@ -313,8 +317,10 @@ workspaceSettingsForm.addEventListener('submit', async (e) => {
   const data = formToObj(workspaceSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'system_prompt', 'embed_api_key', 'max_tokens',
+    'rewrite_model', 'rewrite_prompt',
   ]);
   castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens']);
+  data.searxng_enabled = workspaceSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(wsSettingsMsg, 'Saving...');
   const res = await apiFetch(`/workspace/${currentWorkspaceSlug}`, {
@@ -362,8 +368,10 @@ createWorkspaceForm.addEventListener('submit', async (e) => {
     'name', 'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
     'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'rewrite_model', 'rewrite_prompt',
   ]);
   castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
+  data.searxng_enabled = createWorkspaceForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(createWorkspaceMsg, 'Creating...');
   const res = await apiFetch('/workspace', {
@@ -498,6 +506,8 @@ queryForm.addEventListener('submit', async (e) => {
 
   queryAnswer.textContent = '';
   querySources.innerHTML = '';
+  queryRewriteDebug.classList.add('hidden');
+  queryRewrittenText.textContent = '';
   queryResult.classList.remove('hidden');
   querySubmitBtn.disabled = true;
   querySubmitBtn.textContent = 'Asking...';
@@ -532,6 +542,9 @@ queryForm.addEventListener('submit', async (e) => {
       const data = dataLines.join('\n');
       if (eventName === 'token') {
         queryAnswer.textContent += data.replace(/\\n/g, '\n');
+      } else if (eventName === 'rewritten_query') {
+        queryRewrittenText.textContent = data.replace(/\\n/g, '\n');
+        queryRewriteDebug.classList.remove('hidden');
       } else if (eventName === 'sources') {
         try { renderSources(JSON.parse(data)); } catch {}
       } else if (eventName === 'error') {
@@ -579,28 +592,65 @@ queryClearBtn.addEventListener('click', () => {
   queryAnswer.textContent = '';
   querySources.innerHTML = '';
   queryResult.classList.add('hidden');
+  queryRewriteDebug.classList.add('hidden');
+  queryRewrittenText.textContent = '';
   querySubmitBtn.disabled = false;
   querySubmitBtn.textContent = 'Ask';
 });
 
 function renderSources(sources) {
   querySources.innerHTML = '';
-  if (!sources || !sources.length) {
+
+  // Normalize: old flat-array format vs new {documents, web} format
+  const docs = Array.isArray(sources) ? sources : (sources.documents || []);
+  const web  = Array.isArray(sources) ? []      : (sources.web       || []);
+
+  if (!docs.length && !web.length) {
     querySources.innerHTML = '<p class="muted">No sources returned.</p>';
     return;
   }
-  sources.forEach(s => {
-    const div = document.createElement('div');
-    div.className = 'source-item';
-    div.innerHTML = `
-      <div class="source-meta">
-        <span>${escHtml(s.filename || 'Unknown')}</span>
-        <span>Score: ${typeof s.score === 'number' ? s.score.toFixed(3) : '—'}</span>
-      </div>
-      <div class="source-text">${escHtml(s.text || '')}</div>
-    `;
-    querySources.appendChild(div);
-  });
+
+  // --- Document sources ---
+  if (docs.length) {
+    const header = document.createElement('p');
+    header.className = 'sources-section-label';
+    header.textContent = 'Documents';
+    querySources.appendChild(header);
+
+    docs.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'source-item';
+      div.innerHTML = `
+        <div class="source-meta">
+          <span>${escHtml(s.filename || 'Unknown')}</span>
+          <span>Score: ${typeof s.score === 'number' ? s.score.toFixed(3) : '—'}</span>
+        </div>
+        <div class="source-text">${escHtml(s.text || '')}</div>
+      `;
+      querySources.appendChild(div);
+    });
+  }
+
+  // --- Web sources ---
+  if (web.length) {
+    const header = document.createElement('p');
+    header.className = 'sources-section-label web-label';
+    header.textContent = 'Web Results';
+    querySources.appendChild(header);
+
+    web.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'source-item web-source-item';
+      div.innerHTML = `
+        <div class="source-meta">
+          <a href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer" class="web-source-title">${escHtml(r.title || r.url || 'Web result')}</a>
+        </div>
+        <div class="source-url">${escHtml(r.url || '')}</div>
+        <div class="source-text">${escHtml(r.snippet || '')}</div>
+      `;
+      querySources.appendChild(div);
+    });
+  }
 }
 
 // =====================================================
@@ -620,8 +670,10 @@ globalSettingsForm.addEventListener('submit', async (e) => {
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
     'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'rewrite_model', 'rewrite_prompt',
   ]);
   castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
+  data.searxng_enabled = globalSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(globalSettingsMsg, 'Saving...');
   const res = await apiFetch('/settings', {
@@ -645,15 +697,24 @@ globalSettingsForm.addEventListener('submit', async (e) => {
 function fillForm(form, obj) {
   Object.entries(obj).forEach(([key, val]) => {
     const el = form.elements[key];
-    if (el) el.value = val ?? '';
+    if (!el) return;
+    if (el.type === 'checkbox') {
+      el.checked = !!val;
+    } else {
+      el.value = val ?? '';
+    }
   });
 }
+
+// Fields that should always be included even when empty (to allow clearing them)
+const _ALWAYS_INCLUDE = new Set(['rewrite_model', 'rewrite_prompt']);
 
 function formToObj(form, fields) {
   const obj = {};
   fields.forEach(f => {
     const el = form.elements[f];
-    if (el && el.value !== '') obj[f] = el.value;
+    if (!el) return;
+    if (el.value !== '' || _ALWAYS_INCLUDE.has(f)) obj[f] = el.value;
   });
   return obj;
 }

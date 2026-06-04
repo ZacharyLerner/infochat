@@ -1,0 +1,47 @@
+# RhodyRAG — full stack: FastAPI backend + SearXNG web search
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in API keys.
+#   2. docker compose up -d
+#
+# The backend is available at  http://localhost:3001
+# SearXNG UI is available at   http://localhost:8888  (for debugging; backend
+#   uses the internal Docker network name 'searxng' on port 8080)
+#
+# To disable web search, simply leave SEARXNG_URL unset in .env or set
+# searxng_enabled=0 on individual workspaces.
+
+services:
+
+  # ── RhodyRAG FastAPI backend ────────────────────────────────────────────────
+  backend:
+    build: .
+    ports:
+      - "3001:3001"
+    env_file: .env
+    environment:
+      # Override SEARXNG_URL to use the internal Docker service name so the
+      # backend reaches SearXNG over the compose network (not the host port).
+      - SEARXNG_URL=http://searxng:8080
+    volumes:
+      # Persist the vector store, SQLite DB, and document tracking file
+      - ./lancedb:/app/lancedb
+      - ./settings.db:/app/settings.db
+      - ./docs.json:/app/docs.json
+    depends_on:
+      - searxng
+    restart: unless-stopped
+
+  # ── SearXNG ─────────────────────────────────────────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      # Expose on host for debugging / manual searches.
+      # The backend communicates over the internal network (port 8080).
+      - "8888:8080"
+    volumes:
+      # Mount custom settings.yml that enables JSON output format
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_SECRET_KEY=${SEARXNG_SECRET_KEY:-change-me-in-production}
+    restart: unless-stopped

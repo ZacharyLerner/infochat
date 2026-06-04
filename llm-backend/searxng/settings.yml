@@ -1,0 +1,68 @@
+# SearXNG settings for RhodyRAG
+#
+# Key changes from the SearXNG defaults:
+#   - JSON output format enabled  (required for the /search?format=json API)
+#   - Rate limiter disabled       (private internal network — no public exposure)
+#   - A focused set of general-purpose engines enabled
+#
+# IMPORTANT: Change 'secret_key' before deploying publicly.
+# When running via docker-compose the secret key is set via the
+# SEARXNG_SECRET_KEY environment variable (see docker-compose.yml).
+
+use_default_settings: true
+
+server:
+  # Must be set; overridden by the SEARXNG_SECRET_KEY env var in compose.
+  secret_key: "change-me-in-production"
+  # Disable the built-in rate limiter — RhodyRAG runs on a trusted internal
+  # network and the backend already controls query volume.
+  limiter: false
+  # Not a public instance; skip the "you are using a public instance" banner.
+  public_instance: false
+  image_proxy: false
+
+search:
+  # Enable JSON output format — disabled by default in SearXNG for security.
+  # RhodyRAG uses GET /search?format=json for programmatic access.
+  formats:
+    - html
+    - json
+  # Default language / locale
+  default_lang: "en"
+  # Number of results per page (the backend requests top-3 regardless)
+  results_on_new_tab: false
+
+# Outgoing request settings
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  useragent_suffix: ""
+  pool_connections: 100
+  pool_maxsize: 20
+
+# Enable a focused set of reliable general-purpose engines.
+# Disable everything else to keep response times fast and predictable.
+engines:
+  - name: google
+    engine: google
+    categories: general
+    disabled: false
+    weight: 2
+
+  - name: bing
+    engine: bing
+    categories: general
+    disabled: false
+    weight: 1
+
+  - name: duckduckgo
+    engine: duckduckgo
+    categories: general
+    disabled: false
+    weight: 1
+
+  - name: wikipedia
+    engine: wikipedia
+    categories: general
+    disabled: false
+    weight: 1

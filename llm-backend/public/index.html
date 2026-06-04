@@ -129,6 +129,26 @@
               <label>Embed Model <span class="muted">(locked)</span></label>
               <input type="text" name="embed_model" disabled />
             </div>
+
+            <div class="form-section-divider">Web Search</div>
+            <div class="form-row">
+              <label>Enable SearXNG Web Search</label>
+              <label class="toggle-label">
+                <input type="checkbox" name="searxng_enabled" />
+                <span>Augment queries with live web results</span>
+              </label>
+            </div>
+
+            <div class="form-section-divider">Query Rewriting</div>
+            <div class="form-row">
+              <label>Rewrite Model <span class="muted">(leave blank to disable)</span></label>
+              <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
+            </div>
+            <div class="form-row full-width">
+              <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
+              <textarea name="rewrite_prompt" rows="6" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+            </div>
+
             <div class="form-actions">
               <button type="submit" class="btn-primary">Save Changes</button>
               <span id="ws-settings-msg" class="status-msg"></span>
@@ -183,6 +203,11 @@
             </form>
 
             <div id="query-result" class="hidden">
+              <div id="query-rewrite-debug" class="hidden">
+                <h4>Rewritten Query <span class="debug-badge">debug</span></h4>
+                <div id="query-rewritten-text" class="rewrite-debug-box"></div>
+              </div>
+
               <h4>Answer</h4>
               <div id="query-answer" class="answer-box"></div>
 
@@ -249,6 +274,26 @@
               <label>System Prompt</label>
               <textarea name="system_prompt" rows="3" placeholder="Leave blank to use global default"></textarea>
             </div>
+
+            <div class="form-section-divider">Web Search</div>
+            <div class="form-row">
+              <label>Enable SearXNG Web Search</label>
+              <label class="toggle-label">
+                <input type="checkbox" name="searxng_enabled" />
+                <span>Augment queries with live web results</span>
+              </label>
+            </div>
+
+            <div class="form-section-divider">Query Rewriting</div>
+            <div class="form-row">
+              <label>Rewrite Model <span class="muted">(leave blank to disable)</span></label>
+              <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
+            </div>
+            <div class="form-row full-width">
+              <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
+              <textarea name="rewrite_prompt" rows="4" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+            </div>
+
             <div class="form-actions">
               <button type="submit" class="btn-primary">Create Workspace</button>
               <span id="create-workspace-msg" class="status-msg"></span>
@@ -307,6 +352,26 @@
             <label>System Prompt</label>
             <textarea name="system_prompt" rows="4"></textarea>
           </div>
+
+          <div class="form-section-divider">Web Search</div>
+          <div class="form-row">
+            <label>Enable SearXNG Web Search</label>
+            <label class="toggle-label">
+              <input type="checkbox" name="searxng_enabled" />
+              <span>Augment queries with live web results</span>
+            </label>
+          </div>
+
+          <div class="form-section-divider">Query Rewriting</div>
+          <div class="form-row">
+            <label>Rewrite Model <span class="muted">(leave blank to disable)</span></label>
+            <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
+          </div>
+          <div class="form-row full-width">
+            <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
+            <textarea name="rewrite_prompt" rows="6" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+          </div>
+
           <div class="form-actions">
             <button type="submit" class="btn-primary">Save Global Settings</button>
             <span id="global-settings-msg" class="status-msg"></span>

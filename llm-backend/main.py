@@ -50,13 +50,29 @@ def _read_docs() -> Dict[str, Any]:
 
 
 def _write_docs(data: Dict[str, Any]):
-    """Atomically write docs.json using a temp file + rename to avoid corruption."""
+    """Write docs.json under the _docs_lock (caller must hold the lock).
+
+    Uses a write-to-temp-then-rename strategy for atomicity on native
+    filesystems. On Docker bind-mounts (macOS virtiofs/gRPC-FUSE), os.replace()
+    across the overlay boundary raises EBUSY, so we fall back to writing
+    directly to the target path — safe because the caller already holds
+    _docs_lock, which serialises all reads and writes.
+    """
     text = json.dumps(data, indent=2)
     tmp_fd, tmp_path = tempfile.mkstemp(dir=DOCS_FILE.parent, suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w") as f:
             f.write(text)
-        os.replace(tmp_path, DOCS_FILE)
+        try:
+            os.replace(tmp_path, DOCS_FILE)
+        except OSError:
+            # Bind-mount atomic rename not supported (Docker on macOS).
+            # Fall back to direct overwrite — safe under _docs_lock.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            DOCS_FILE.write_text(text)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -116,6 +132,9 @@ class CreateWorkspace(BaseModel):
     embed_model: Optional[str] = Field(None, description="Embedding model for this workspace. Locked after creation — changing it would cause vector dimension mismatches. Falls back to the global default if blank. Use 'direct-openai/<model>' to bypass the gateway.")
     embed_api_key: Optional[str] = Field(None, description="API key for the embedding model. Only needed when using a direct-openai/ embedding model that requires its own key separate from the LLM gateway key.")
     max_tokens: Optional[int] = Field(None, description="Maximum number of tokens the LLM may generate in a single response.")
+    searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation for every query in this workspace.")
+    rewrite_model: Optional[str] = Field(None, description="LiteLLM model string for query rewriting (e.g. 'openai/gpt-4o-mini'). Leave blank to disable rewriting.")
+    rewrite_prompt: Optional[str] = Field(None, description="System prompt for the query rewriter. Leave blank to use the built-in default.")
 
 
 class UpdateWorkspace(BaseModel):
@@ -129,6 +148,9 @@ class UpdateWorkspace(BaseModel):
     similarity_threshold: Optional[float] = Field(None)
     embed_api_key: Optional[str] = Field(None)
     max_tokens: Optional[int] = Field(None)
+    searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation.")
+    rewrite_model: Optional[str] = Field(None, description="Model for query rewriting. Empty string disables rewriting.")
+    rewrite_prompt: Optional[str] = Field(None, description="Custom rewrite prompt. Empty string uses built-in default.")
 
 
 class QueryRequest(BaseModel):
@@ -149,6 +171,9 @@ class UpdateSettings(BaseModel):
     embed_model: Optional[str] = None
     embed_api_key: Optional[str] = None
     max_tokens: Optional[int] = None
+    searxng_enabled: Optional[bool] = None
+    rewrite_model: Optional[str] = None
+    rewrite_prompt: Optional[str] = None
 
 
 @app.get("/settings", summary="Get global settings")
@@ -158,7 +183,11 @@ def get_settings():
 
 @app.put("/settings", summary="Update global settings")
 def update_settings(body: UpdateSettings):
-    return db.update_settings(**body.model_dump())
+    fields = body.model_dump()
+    # Cast bool → int for SQLite INTEGER column
+    if fields.get("searxng_enabled") is not None:
+        fields["searxng_enabled"] = int(fields["searxng_enabled"])
+    return db.update_settings(**fields)
 
 
 # --- Workspace CRUD ----------------------------------------------------------
@@ -183,6 +212,9 @@ def create_workspace(body: CreateWorkspace):
         embed_model=body.embed_model or "",
         embed_api_key=body.embed_api_key or "",
         max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
+        searxng_enabled=int(body.searxng_enabled) if body.searxng_enabled is not None else 0,
+        rewrite_model=body.rewrite_model or "",
+        rewrite_prompt=body.rewrite_prompt or "",
     )
     manager.on_workspace_created(slug=ws["slug"], name=ws["name"])
     return ws
@@ -200,7 +232,11 @@ def get_workspace(slug: str):
 def update_workspace(slug: str, body: UpdateWorkspace):
     if db.get_workspace(slug) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    ws = db.update_workspace(slug, **body.model_dump())
+    fields = body.model_dump()
+    # Cast bool → int for SQLite INTEGER column
+    if fields.get("searxng_enabled") is not None:
+        fields["searxng_enabled"] = int(fields["searxng_enabled"])
+    ws = db.update_workspace(slug, **fields)
     if body.name is not None:
         manager.on_workspace_renamed(slug=slug, new_name=body.name)
     return ws

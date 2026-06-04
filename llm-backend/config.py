@@ -26,6 +26,9 @@ APP_API_KEY = os.getenv("ADMIN_API_KEY", "")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "3001"))
 
+# SearXNG instance URL (used for web search augmentation)
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8888")
+
 # --- Downstream service propagation ------------------------------------------
 # File-server (document upload/management)
 FILE_SERVER_URL = os.getenv("FILE_SERVER_URL", "http://10.140.2.31:3001")

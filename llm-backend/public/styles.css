@@ -718,3 +718,118 @@ td code {
 ::-webkit-scrollbar-thumb:hover {
   background: #aaa;
 }
+
+/* =====================================================
+   FORM SECTION DIVIDERS
+   ===================================================== */
+
+.form-section-divider {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  padding-top: 16px;
+  padding-bottom: 4px;
+  border-top: 1px solid var(--border-light);
+  margin-top: 4px;
+}
+
+/* Toggle-style checkbox label in settings forms */
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  margin-top: 4px;
+}
+
+.toggle-label input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--btn-primary-bg);
+  flex-shrink: 0;
+}
+
+/* =====================================================
+   QUERY REWRITE DEBUG PANEL
+   ===================================================== */
+
+.rewrite-debug-box {
+  background: #f2f4f6;
+  border: 1px solid #d4d8dc;
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: #4a5568;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.debug-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #ffffff;
+  background: #8a8a8a;
+  padding: 1px 6px;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+/* =====================================================
+   SOURCES — SECTION LABELS + WEB RESULTS
+   ===================================================== */
+
+.sources-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  padding: 4px 0 2px;
+  margin-top: 4px;
+}
+
+.sources-section-label.web-label {
+  margin-top: 12px;
+  color: #3b6ea5;
+}
+
+.web-source-item {
+  border-color: #c5d8f0;
+  background: #f7faff;
+}
+
+.web-source-title {
+  color: #1a5fa6;
+  font-weight: 500;
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.web-source-title:hover {
+  text-decoration: underline;
+}
+
+.source-url {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-light);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -7,3 +7,4 @@ __pycache__/
 *.db-wal
 docs.json
 lancedb/
+.DS_Store
