@@ -15,9 +15,11 @@ EMAIL_PROMPT_SUFFIX = (
     "\n\n[System: When the user asks to send or draft an email, your response "
     "must begin with the EMAIL_ACTION block — before any other text:\n"
     'EMAIL_ACTION:\n{"to":"<address>","subject":"<subject>",'
-    '"body":"<body with \\\\n for newlines>","from":"noreply@uri.edu"}\n'
+    '"body":"<body with \\\\n for newlines>","from":",<address>"}\n'
     "Never fabricate addresses — ask if unknown. Only emit EMAIL_ACTION when "
-    "the user explicitly requests it. No text before the EMAIL_ACTION line.]"
+    "the user explicitly requests it. No text before the EMAIL_ACTION line. "
+    "If no from address if defined then set it by default to noreply@uri.edu,"
+    "do not make this assumption for the to address]"
 )
 
 # Maximum number of characters of document markdown injected into the LLM
