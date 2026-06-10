@@ -263,10 +263,15 @@ async def stream_chat_session(
         logger.debug("stream_chat_session: stream complete in %.0fms", elapsed_ms)
     except httpx.HTTPStatusError as exc:
         elapsed_ms = (time.perf_counter() - t0) * 1000
+        try:
+            await exc.response.aread()
+            body_preview = exc.response.text[:500]
+        except Exception:
+            body_preview = "<unreadable>"
         logger.error(
             "stream_chat_session: HTTP %d from RhodyRAG after %.0fms — url=%s body=%s",
             exc.response.status_code, elapsed_ms, url,
-            exc.response.text[:500],
+            body_preview,
         )
         raise
     except Exception as exc:
