@@ -457,6 +457,11 @@ function buildCitations(sources) {
 
   const items = unique.map((s, i) => {
     const label = escapeHtml(s.title || s.id || `Source ${i + 1}`);
+    if (s.url) {
+      return `<a class="citation-link citation-weblink" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">
+                <span class="citation-index">${i + 1}</span>${label}
+              </a>`;
+    }
     return `<span class="citation-link citation-nolink">
               <span class="citation-index">${i + 1}</span>${label}
             </span>`;

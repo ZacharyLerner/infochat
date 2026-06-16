@@ -45,21 +45,44 @@ def _translate_sse_lines(event_type: Optional[str], raw: str) -> Optional[str]:
 
     elif event_type == "sources":
         try:
-            sources = json.loads(raw)
+            payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             logger.warning("_translate_sse_lines: failed to parse sources JSON: %s — raw='%s'",
                            exc, raw[:200])
-            sources = []
+            payload = {}
+
+        # Backend now emits {"documents": [...], "web": [...]}
+        # Fall back to treating the payload as a flat array for backwards compat.
+        if isinstance(payload, dict):
+            doc_sources = payload.get("documents", [])
+            web_sources = payload.get("web", [])
+        else:
+            doc_sources = payload if isinstance(payload, list) else []
+            web_sources = []
+
         mapped = [
             {
                 "title": s.get("filename", "Source"),
                 "url": "",
                 "score": s.get("score"),
                 "text": s.get("text", ""),
+                "type": "document",
             }
-            for s in sources
+            for s in doc_sources
+        ] + [
+            {
+                "title": s.get("title", "Web Source"),
+                "url": s.get("url", ""),
+                "score": None,
+                "text": s.get("snippet", ""),
+                "type": "web",
+            }
+            for s in web_sources
         ]
-        logger.debug("_translate_sse_lines: sources event — %d source(s) mapped", len(mapped))
+        logger.debug(
+            "_translate_sse_lines: sources event — %d doc(s), %d web source(s)",
+            len(doc_sources), len(web_sources),
+        )
         return f"data: {json.dumps({'textResponse': '', 'sources': mapped})}\n\n"
 
     elif event_type == "error":

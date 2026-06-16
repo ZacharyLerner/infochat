@@ -585,9 +585,13 @@
       seen.add(k);
       return true;
     });
-    const badges = unique.map((s, i) =>
-      `<span class="uc-citation-badge">${i + 1}. ${_escHtml(s.title || s.id || `Source ${i + 1}`)}</span>`
-    ).join("");
+    const badges = unique.map((s, i) => {
+      const label = _escHtml(s.title || s.id || `Source ${i + 1}`);
+      if (s.url) {
+        return `<a class="uc-citation-badge uc-citation-weblink" href="${_escHtml(s.url)}" target="_blank" rel="noopener noreferrer">${i + 1}. ${label}</a>`;
+      }
+      return `<span class="uc-citation-badge">${i + 1}. ${label}</span>`;
+    }).join("");
     return `<details class="uc-citations"><summary>Sources (${unique.length})</summary><div class="uc-citations-list">${badges}</div></details>`;
   }
 
