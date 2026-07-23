@@ -213,7 +213,9 @@ async def _rewrite_if_enabled(
         history=history,
     )
 
-    return rewritten, rewritten
+    # Only treat as rewritten if the query actually changed
+    changed = rewritten != query
+    return rewritten, rewritten if changed else None
 
 
 async def _retrieve_nodes(index: VectorStoreIndex | None, query: str, workspace: dict) -> list:
@@ -293,7 +295,9 @@ async def stream_chat_session(
         memory = state["memory"]
 
         # ── 2. Determine base retrieval query (caller override or message) ───
-        base_query = retrieval_query if retrieval_query else message
+        # Strip any frontend-injected system instructions appended after \n\n[
+        clean_message = message.split("\n\n[")[0].strip()
+        base_query = retrieval_query if retrieval_query else clean_message
 
         # For rewrite context: extract the last 2 prior turns from memory
         prior_turns = [
@@ -410,6 +414,20 @@ async def stream_chat_session(
         sources_payload = {"documents": doc_sources, "web": web_results}
         yield f"event: sources\ndata: {json.dumps(sources_payload)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
+
+        # ── 9. Emit log event (intercepted by main.py, never reaches browser) ─
+        log_entry = {
+            "id": str(_uuid.uuid4()),
+            "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            "streamed": True,
+            "chat_session": True,
+            "session_id": session_id,
+            "question": clean_message,
+            "rewritten_query": rewritten,
+            "answer": full_response.strip(),
+            "sources": sources_payload,
+        }
+        yield f"event: log\ndata: {json.dumps(log_entry)}\n\n"
 
     except Exception as exc:
         error_msg = str(exc).replace('\n', ' ')
@@ -661,6 +679,7 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
         log_entry = {
             "id": str(_uuid.uuid4()),
             "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            "streamed": True,
             "question": question,
             "rewritten_query": rewritten,
             "answer": full_answer.strip(),

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -547,12 +547,26 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     history = [m.model_dump() for m in (body.history or [])]
-    return StreamingResponse(
-        query.stream_chat_session(
+
+    async def _logging_stream():
+        async for chunk in query.stream_chat_session(
             session_id, ws, body.message,
             history=history,
             retrieval_query=body.retrieval_query,
-        ),
+        ):
+            if chunk.startswith("event: log\n"):
+                # Intercept the log event — write to disk, don't forward to browser
+                try:
+                    data_line = chunk.split("data: ", 1)[1].strip()
+                    entry = json.loads(data_line)
+                    await asyncio.to_thread(_append_log, slug, entry)
+                except Exception:
+                    pass
+            else:
+                yield chunk
+
+    return StreamingResponse(
+        _logging_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -637,7 +651,32 @@ def remove_workspace_docs(slug: str):
 
 
 # --- Static files (frontend) -------------------------------------------------
-app.mount("/", StaticFiles(directory="public", html=True), name="static")
+# A catch-all route serves index.html for all History API URLs so that
+# direct loads and page refreshes work at any depth (/workspace/{slug}/query,
+# /settings, etc.).  Real static files (app.js, styles.css …) are detected
+# by checking whether the path resolves to an actual file in public/ first.
+_PUBLIC_DIR = Path("public")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_catchall(full_path: str):
+    """Serve static files from public/ or fall back to index.html (SPA).
+
+    - /app.js, /styles.css, etc. → served as files
+    - /workspaces, /workspace/{slug}/query, /settings, … → index.html
+    """
+    candidate = _PUBLIC_DIR / full_path
+    # Resolve to prevent path traversal outside public/
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(_PUBLIC_DIR.resolve())
+    except ValueError:
+        return FileResponse(str(_PUBLIC_DIR / "index.html"))
+
+    if resolved.is_file():
+        return FileResponse(str(resolved))
+    # SPA fallback
+    return FileResponse(str(_PUBLIC_DIR / "index.html"))
 
 
 # --- Run ---------------------------------------------------------------------

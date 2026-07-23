@@ -164,15 +164,128 @@ function showLogin() {
 function showApp() {
   loginScreen.classList.add('hidden');
   appScreen.classList.remove('hidden');
-  showView('workspaces');
-  loadWorkspaces();
+  // Restore the view for the current URL (handles direct loads, refreshes,
+  // and back/forward after login).  If the path is just '/', redirect to /workspaces.
+  router();
 }
 
 // =====================================================
-// NAVIGATION
+// ROUTING (History API)
 // =====================================================
 
-function showView(name) {
+// Tab name → panel element id mapping
+const TAB_PANELS = {
+  settings:  'ws-settings',
+  documents: 'ws-documents',
+  query:     'ws-query',
+  log:       'ws-log',
+};
+// Reverse: panel id → URL tab segment
+const PANEL_TO_TAB = Object.fromEntries(Object.entries(TAB_PANELS).map(([k, v]) => [v, k]));
+
+/**
+ * Navigate to a new path, pushing a history entry and triggering the router.
+ * Pass { replace: true } to replace instead of push (used during init).
+ */
+function navigateTo(path, { replace = false } = {}) {
+  if (replace) {
+    history.replaceState(null, '', path);
+  } else {
+    history.pushState(null, '', path);
+  }
+  router();
+}
+
+/**
+ * Parse the current pathname and activate the correct view/tab.
+ * Must only be called when the user is already authenticated.
+ *
+ * URL scheme:
+ *   /                          → redirect to /workspaces
+ *   /workspaces                → workspace list
+ *   /settings                  → global settings
+ *   /workspace/{slug}          → workspace detail, settings tab
+ *   /workspace/{slug}/settings → workspace detail, settings tab
+ *   /workspace/{slug}/documents→ workspace detail, documents tab
+ *   /workspace/{slug}/query    → workspace detail, query tab
+ *   /workspace/{slug}/log      → workspace detail, log tab
+ */
+async function router() {
+  const path = window.location.pathname;
+
+  // Root → workspaces
+  if (path === '/' || path === '') {
+    navigateTo('/workspaces', { replace: true });
+    return;
+  }
+
+  if (path === '/workspaces') {
+    _showViewDOM('workspaces');
+    loadWorkspaces();
+    return;
+  }
+
+  if (path === '/settings') {
+    _showViewDOM('settings');
+    loadGlobalSettings();
+    return;
+  }
+
+  // /workspace/{slug}[/{tab}]
+  const wsMatch = path.match(/^\/workspace\/([^/]+)(?:\/([^/]*))?$/);
+  if (wsMatch) {
+    const slug = decodeURIComponent(wsMatch[1]);
+    const tab  = wsMatch[2] || 'settings';
+
+    // Validate tab name
+    const panelId = TAB_PANELS[tab] || 'ws-settings';
+
+    // Fetch workspace to get name (and detect 404)
+    const res = await apiFetch(`/workspace/${slug}`);
+    if (!res.ok) {
+      // Workspace not found — redirect to list
+      navigateTo('/workspaces', { replace: true });
+      return;
+    }
+    const ws = await res.json();
+
+    // Clear query result when switching to a different workspace
+    if (slug !== currentWorkspaceSlug) {
+      if (activeStreamController) {
+        activeStreamController.abort();
+        activeStreamController = null;
+      }
+      queryAnswer.textContent = '';
+      querySources.innerHTML = '';
+      queryResult.classList.add('hidden');
+      queryRewriteDebug.classList.add('hidden');
+      queryRewrittenText.textContent = '';
+      queryInput.value = '';
+      querySubmitBtn.disabled = false;
+      querySubmitBtn.textContent = 'Ask';
+    }
+
+    // Update state
+    currentWorkspaceSlug = slug;
+    currentWorkspaceName = ws.name;
+    workspaceDetailName.textContent = ws.name;
+
+    // Activate the right tab in DOM (without pushing a new URL)
+    _activateTab(panelId);
+
+    _showViewDOM('workspace-detail');
+    loadWorkspaceSettings(slug);
+    loadDocList(slug);
+    if (panelId === 'ws-log') loadQueryLog(slug);
+    return;
+  }
+
+  // Unknown path → workspaces
+  navigateTo('/workspaces', { replace: true });
+}
+
+/** Internal: toggle the three top-level view sections without touching the URL. */
+function _showViewDOM(name) {
   viewWorkspaces.classList.add('hidden');
   viewSettings.classList.add('hidden');
   viewWorkspaceDetail.classList.add('hidden');
@@ -183,14 +296,47 @@ function showView(name) {
     viewWorkspaces.classList.remove('hidden');
   } else if (name === 'settings') {
     viewSettings.classList.remove('hidden');
-    loadGlobalSettings();
   } else if (name === 'workspace-detail') {
     viewWorkspaceDetail.classList.remove('hidden');
   }
 }
 
+/** Internal: activate a tab panel by its element id without touching the URL. */
+function _activateTab(panelId) {
+  tabBtns.forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === panelId);
+  });
+  tabPanels.forEach(p => {
+    p.classList.toggle('hidden', p.id !== panelId);
+  });
+}
+
+// =====================================================
+// NAVIGATION
+// =====================================================
+
+/**
+ * Public showView — updates the URL and switches the view.
+ * For workspace-detail, prefer openWorkspace() or the tab handlers instead.
+ */
+function showView(name) {
+  if (name === 'workspaces') {
+    navigateTo('/workspaces');
+  } else if (name === 'settings') {
+    navigateTo('/settings');
+  } else {
+    // workspace-detail without a slug context — just switch DOM
+    _showViewDOM(name);
+  }
+}
+
 navBtns.forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
+});
+
+// Browser back/forward
+window.addEventListener('popstate', () => {
+  if (apiKey) router();
 });
 
 // =====================================================
@@ -199,13 +345,14 @@ navBtns.forEach(btn => {
 
 tabBtns.forEach(btn => {
   btn.addEventListener('click', () => {
-    tabBtns.forEach(b => b.classList.remove('active'));
-    tabPanels.forEach(p => p.classList.add('hidden'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.remove('hidden');
-    if (btn.dataset.tab === 'ws-log' && currentWorkspaceSlug) {
-      loadQueryLog(currentWorkspaceSlug);
-    }
+    if (!currentWorkspaceSlug) return;
+    const tab = PANEL_TO_TAB[btn.dataset.tab] || 'settings';
+    // Push the tab into the URL — popstate/router will handle DOM activation.
+    // Use replace if we're already on a workspace URL to avoid stacking tab
+    // entries in history (navigating between tabs shouldn't fill up history).
+    const currentIsWorkspace = /^\/workspace\//.test(window.location.pathname);
+    navigateTo(`/workspace/${encodeURIComponent(currentWorkspaceSlug)}/${tab}`,
+               { replace: currentIsWorkspace });
   });
 });
 
@@ -279,34 +426,17 @@ async function deleteWorkspace(slug) {
 // WORKSPACE DETAIL
 // =====================================================
 
-function openWorkspace(slug, name) {
-  currentWorkspaceSlug = slug;
-  currentWorkspaceName = name;
-  workspaceDetailName.textContent = name;
-
-  // Reset tabs to first
-  tabBtns.forEach(b => b.classList.remove('active'));
-  tabPanels.forEach(p => p.classList.add('hidden'));
-  tabBtns[0].classList.add('active');
-  document.getElementById('ws-settings').classList.remove('hidden');
-
-  // Clear query result
-  queryAnswer.textContent = '';
-  querySources.innerHTML = '';
-  queryResult.classList.add('hidden');
-  queryRewriteDebug.classList.add('hidden');
-  queryRewrittenText.textContent = '';
-  queryInput.value = '';
-
-  showView('workspace-detail');
-  loadWorkspaceSettings(slug);
-  loadDocList(slug);
+function openWorkspace(slug, name, tab) {
+  // Navigate to the URL — router() will handle loading data and switching DOM.
+  // If a specific tab is given, navigate to /workspace/{slug}/{tab},
+  // otherwise land on the settings tab (default).
+  const tabSegment = tab && TAB_PANELS[tab] ? `/${tab}` : '';
+  navigateTo(`/workspace/${encodeURIComponent(slug)}${tabSegment}`);
 }
 
 backToWorkspaces.addEventListener('click', () => {
   currentWorkspaceSlug = null;
-  showView('workspaces');
-  loadWorkspaces();
+  navigateTo('/workspaces');
 });
 
 // =====================================================
