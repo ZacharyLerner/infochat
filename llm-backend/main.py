@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Security, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Security, Depends
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
@@ -154,12 +154,31 @@ app = FastAPI(
     title="LLM RAG Backend",
     version="1.0.0",
     lifespan=lifespan,
-    dependencies=[Depends(verify_admin_key)],
+    # /docs, /redoc, and /openapi.json are registered internally by FastAPI
+    # in a way that bypasses this app's dependency-injected auth entirely,
+    # so they are unauthenticated whenever enabled. Disabled unless
+    # config.ENABLE_API_DOCS is explicitly set — see config.py.
+    docs_url="/docs" if config.ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if config.ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if config.ENABLE_API_DOCS else None,
 )
 
 
+
+# All real API routes are registered on this router, which enforces the
+# admin API key. The SPA static-file catch-all route (registered directly on
+# `app` further below) is intentionally NOT behind this dependency: it only
+# ever serves the frontend's static HTML/JS/CSS shell (no data), and the
+# browser cannot attach a custom X-API-Key header on a normal top-level
+# navigation — if the catch-all required the key, the login page itself
+# would be unreachable for anyone without an out-of-band way to set the
+# header. All actual data continues to require the key via apiFetch() in
+# app.js, which does attach the header on every XHR/fetch call.
+api_router = APIRouter(dependencies=[Depends(verify_admin_key)])
+
+
 # --- Auth verification endpoint ----------------------------------------------
-@app.get("/auth/verify", summary="Verify API key")
+@api_router.get("/auth/verify", summary="Verify API key")
 def verify_auth():
     """Returns 200 if the API key is valid (enforced by global dependency)."""
     return {"status": "ok"}
@@ -231,12 +250,12 @@ class UpdateSettings(BaseModel):
     rewrite_prompt: Optional[str] = None
 
 
-@app.get("/settings", summary="Get global settings")
+@api_router.get("/settings", summary="Get global settings")
 def get_settings():
     return db.get_settings()
 
 
-@app.put("/settings", summary="Update global settings")
+@api_router.put("/settings", summary="Update global settings")
 def update_settings(body: UpdateSettings):
     fields = body.model_dump()
     # Cast bool → int for SQLite INTEGER column
@@ -248,7 +267,7 @@ def update_settings(body: UpdateSettings):
     return db.update_settings(**fields)
 
 
-@app.get("/defaults", summary="Get built-in default prompt values")
+@api_router.get("/defaults", summary="Get built-in default prompt values")
 def get_defaults():
     """Return the hardcoded default prompts so the frontend can pre-fill forms."""
     from prompts import DEFAULT_SYSTEM_PROMPT_RAG, DEFAULT_SYSTEM_PROMPT_WEB, DEFAULT_REWRITE_PROMPT
@@ -261,12 +280,12 @@ def get_defaults():
 
 # --- Workspace CRUD ----------------------------------------------------------
 
-@app.get("/workspaces", summary="List all workspaces")
+@api_router.get("/workspaces", summary="List all workspaces")
 def list_workspaces():
     return db.list_workspaces()
 
 
-@app.post("/workspace", summary="Create a new workspace")
+@api_router.post("/workspace", summary="Create a new workspace")
 def create_workspace(body: CreateWorkspace):
     ws = db.create_workspace(
         name=body.name,
@@ -291,7 +310,7 @@ def create_workspace(body: CreateWorkspace):
     return ws
 
 
-@app.get("/workspace/{slug}", summary="Get workspace details")
+@api_router.get("/workspace/{slug}", summary="Get workspace details")
 def get_workspace(slug: str):
     ws = db.get_workspace(slug)
     if ws is None:
@@ -299,7 +318,7 @@ def get_workspace(slug: str):
     return ws
 
 
-@app.put("/workspace/{slug}", summary="Update a workspace")
+@api_router.put("/workspace/{slug}", summary="Update a workspace")
 def update_workspace(slug: str, body: UpdateWorkspace):
     if db.get_workspace(slug) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
@@ -328,7 +347,7 @@ def _drop_lancedb_table(slug: str) -> None:
             ldb.drop_table(tname)
 
 
-@app.delete("/workspace/{slug}", summary="Delete a workspace")
+@api_router.delete("/workspace/{slug}", summary="Delete a workspace")
 async def delete_workspace(slug: str):
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
@@ -376,7 +395,7 @@ def _record_doc(slug: str, doc_id: str, filename: str, chunks: int) -> None:
         _write_docs(data)
 
 
-@app.post("/workspace/{slug}/embed", summary="Upload and embed a file")
+@api_router.post("/workspace/{slug}/embed", summary="Upload and embed a file")
 async def embed_file(slug: str, file: UploadFile = File(..., description="File to parse and embed. Supported types include PDF, DOCX, and plain text.")):
     import asyncio, io
     ws = await asyncio.to_thread(db.get_workspace, slug)
@@ -414,12 +433,20 @@ def _remove_doc_from_json(slug: str, doc_id: str) -> None:
         _write_docs(data)
 
 
-@app.delete("/workspace/{slug}/embed/{doc_id:path}", summary="Delete an embedded file")
+@api_router.delete("/workspace/{slug}/embed/{doc_id:path}", summary="Delete an embedded file")
 async def delete_embed(slug: str, doc_id: str):
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # doc_id is always a server-generated UUID (see embedding.embed_workspace_file).
+    # Reject anything else outright rather than letting it reach the LanceDB
+    # filter expression — defense in depth against filter/query injection.
+    try:
+        uuid.UUID(doc_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Document not found")
 
     deleted = await asyncio.to_thread(embedding.delete_workspace_file, slug, doc_id)
 
@@ -440,7 +467,7 @@ async def delete_embed(slug: str, doc_id: str):
 
 
 # --- Query -------------------------------------------------------------------
-@app.post("/workspace/{slug}/query", summary="Query a workspace")
+@api_router.post("/workspace/{slug}/query", summary="Query a workspace")
 async def query_workspace(slug: str, body: QueryRequest):
     import asyncio, time as _time
     ws = await asyncio.to_thread(db.get_workspace, slug)
@@ -462,7 +489,7 @@ async def query_workspace(slug: str, body: QueryRequest):
     return result
 
 
-@app.post("/workspace/{slug}/query/stream", summary="Stream a query response")
+@api_router.post("/workspace/{slug}/query/stream", summary="Stream a query response")
 async def stream_query_workspace(slug: str, body: QueryRequest):
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
@@ -522,7 +549,7 @@ class ChatSessionStreamRequest(BaseModel):
     )
 
 
-@app.post("/workspace/{slug}/chat/session", summary="Create a new chat session")
+@api_router.post("/workspace/{slug}/chat/session", summary="Create a new chat session")
 async def create_chat_session(slug: str):
     """Returns a fresh session_id UUID. The client stores this and sends it
     back on subsequent /chat/{session_id}/stream requests."""
@@ -533,7 +560,7 @@ async def create_chat_session(slug: str):
     return {"session_id": str(_uuid.uuid4())}
 
 
-@app.post("/workspace/{slug}/chat/{session_id}/stream", summary="Stream a chat response within a session")
+@api_router.post("/workspace/{slug}/chat/{session_id}/stream", summary="Stream a chat response within a session")
 async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStreamRequest):
     """Send a message in an existing chat session and stream the response.
 
@@ -575,7 +602,7 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
     )
 
 
-@app.delete("/workspace/{slug}/chat/{session_id}", status_code=204, summary="Delete a chat session")
+@api_router.delete("/workspace/{slug}/chat/{session_id}", status_code=204, summary="Delete a chat session")
 async def delete_chat_session(slug: str, session_id: str):
     """Remove the chat session from the in-process registry. The browser
     should also remove it from localStorage."""
@@ -586,7 +613,7 @@ async def delete_chat_session(slug: str, session_id: str):
 
 # --- Query log endpoints -----------------------------------------------------
 
-@app.get("/workspace/{slug}/logs", summary="Get query log for a workspace")
+@api_router.get("/workspace/{slug}/logs", summary="Get query log for a workspace")
 def get_logs(slug: str):
     """Return all log entries for a workspace, newest first."""
     with _logs_lock:
@@ -594,7 +621,7 @@ def get_logs(slug: str):
     return list(reversed(data))
 
 
-@app.delete("/workspace/{slug}/logs", status_code=204, summary="Clear query log for a workspace")
+@api_router.delete("/workspace/{slug}/logs", status_code=204, summary="Clear query log for a workspace")
 def clear_logs(slug: str):
     """Delete all log entries for a workspace."""
     with _logs_lock:
@@ -613,14 +640,14 @@ class DocRecord(BaseModel):
     uploaded_at: Optional[str] = None
 
 
-@app.get("/docs/{slug}", summary="List tracked documents for a workspace")
+@api_router.get("/docs/{slug}", summary="List tracked documents for a workspace")
 def list_docs(slug: str):
     with _docs_lock:
         data = _read_docs()
     return data.get(slug, [])
 
 
-@app.post("/docs/{slug}", status_code=201, summary="Track a document record")
+@api_router.post("/docs/{slug}", status_code=201, summary="Track a document record")
 def add_doc(slug: str, body: DocRecord):
     with _docs_lock:
         data = _read_docs()
@@ -631,7 +658,7 @@ def add_doc(slug: str, body: DocRecord):
     return {"ok": True}
 
 
-@app.delete("/docs/{slug}/{doc_id}", summary="Remove a document record")
+@api_router.delete("/docs/{slug}/{doc_id}", summary="Remove a document record")
 def remove_doc(slug: str, doc_id: str):
     with _docs_lock:
         data = _read_docs()
@@ -641,13 +668,16 @@ def remove_doc(slug: str, doc_id: str):
     return {"ok": True}
 
 
-@app.delete("/docs/{slug}", summary="Remove all doc records for a workspace")
+@api_router.delete("/docs/{slug}", summary="Remove all doc records for a workspace")
 def remove_workspace_docs(slug: str):
     with _docs_lock:
         data = _read_docs()
         data.pop(slug, None)
         _write_docs(data)
     return {"ok": True}
+
+
+app.include_router(api_router, prefix="/api")
 
 
 # --- Static files (frontend) -------------------------------------------------
@@ -674,9 +704,13 @@ async def spa_catchall(full_path: str):
         return FileResponse(str(_PUBLIC_DIR / "index.html"))
 
     if resolved.is_file():
-        return FileResponse(str(resolved))
+        # Prevent browsers from caching JS/CSS so deploys take effect immediately.
+        no_cache_headers = {"Cache-Control": "no-store"} \
+            if full_path.endswith((".js", ".css")) else {}
+        return FileResponse(str(resolved), headers=no_cache_headers)
     # SPA fallback
-    return FileResponse(str(_PUBLIC_DIR / "index.html"))
+    return FileResponse(str(_PUBLIC_DIR / "index.html"),
+                        headers={"Cache-Control": "no-store"})
 
 
 # --- Run ---------------------------------------------------------------------

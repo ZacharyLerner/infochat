@@ -22,6 +22,12 @@ DB_PATH = os.getenv("DB_PATH", "./settings.db")
 # Admin API key (read from ADMIN_API_KEY in .env)
 APP_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
+# Interactive API docs (Swagger UI / ReDoc / raw OpenAPI schema) are served
+# by FastAPI on internal routes that bypass this app's own auth dependency
+# system, so they are unauthenticated by design. Disabled by default —
+# enable only for local development by setting ENABLE_API_DOCS=1 in .env.
+ENABLE_API_DOCS = os.getenv("ENABLE_API_DOCS", "false").strip().lower() in ("1", "true", "yes")
+
 # Server host/port
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "3001"))

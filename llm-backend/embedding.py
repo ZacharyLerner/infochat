@@ -108,14 +108,19 @@ def delete_workspace_file(slug: str, doc_id: str) -> int:
             return 0
 
         tbl = db.open_table(tname)
+        # Escape single quotes to prevent breaking out of the string literal in
+        # the LanceDB filter expression (defense in depth — callers should
+        # also validate doc_id format before reaching this point).
+        safe_doc_id = doc_id.replace("'", "''")
+        filter_expr = f"doc_id = '{safe_doc_id}'"
         # Count matching rows before deletion
         try:
-            count = len(tbl.search().where(f"doc_id = '{doc_id}'").to_list())
+            count = len(tbl.search().where(filter_expr).to_list())
         except Exception:
             count = 0
 
         if count > 0:
-            tbl.delete(f"doc_id = '{doc_id}'")
+            tbl.delete(filter_expr)
         return count
 
 

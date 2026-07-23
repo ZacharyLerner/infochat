@@ -240,11 +240,16 @@ class TestWorkspaceCRUD:
 # ---------------------------------------------------------------------------
 
 class TestEmbedEndpoints:
+    # doc_id is always a server-generated UUID in production
+    # (see embedding.embed_workspace_file), and DELETE /workspace/{slug}/embed/{doc_id}
+    # validates the UUID format before use, so the mock must return one too.
+    FAKE_DOC_ID = "12345678-1234-5678-1234-567812345678"
+
     def _mock_embed(self):
         """Return a context manager that patches embed_workspace_file."""
         return patch(
             "main.embedding.embed_workspace_file",
-            return_value=(5, "fake-doc-id-1234"),
+            return_value=(5, self.FAKE_DOC_ID),
         )
 
     def test_embed_file_success(self, test_client, workspace):
@@ -259,7 +264,7 @@ class TestEmbedEndpoints:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["chunks_embedded"] == 5
-        assert data["doc_id"] == "fake-doc-id-1234"
+        assert data["doc_id"] == self.FAKE_DOC_ID
         assert data["filename"] == "test.txt"
 
     def test_embed_file_workspace_not_found(self, test_client):
@@ -294,7 +299,7 @@ class TestEmbedEndpoints:
         docs = resp.json()
         assert len(docs) == 1
         assert docs[0]["filename"] == "doc.txt"
-        assert docs[0]["doc_id"] == "fake-doc-id-1234"
+        assert docs[0]["doc_id"] == self.FAKE_DOC_ID
 
     def test_delete_embed_success(self, test_client, workspace):
         slug = workspace["slug"]

@@ -4,7 +4,7 @@
    ===================================================== */
 
 // Use same origin so this works regardless of host/port
-const API_BASE = '';
+const API_BASE = '/api';
 
 // =====================================================
 // STATE
@@ -89,6 +89,7 @@ async function apiFetch(path, options = {}) {
   const res = await fetch(API_BASE + path, {
     ...options,
     headers: {
+      'Accept': 'application/json',
       'X-API-Key': apiKey,
       ...(options.headers || {}),
     },
@@ -101,7 +102,7 @@ async function apiFetch(path, options = {}) {
 // =====================================================
 
 function loadApiKey() {
-  const stored = localStorage.getItem('rhodyrag_api_key');
+  const stored = sessionStorage.getItem('rhodyrag_api_key');
   if (stored) {
     apiKey = stored;
     return true;
@@ -111,20 +112,22 @@ function loadApiKey() {
 
 function saveApiKey(key) {
   apiKey = key;
-  localStorage.setItem('rhodyrag_api_key', key);
+  sessionStorage.setItem('rhodyrag_api_key', key);
 }
 
 function clearApiKey() {
   apiKey = '';
-  localStorage.removeItem('rhodyrag_api_key');
+  sessionStorage.removeItem('rhodyrag_api_key');
 }
 
 async function validateKey(key) {
   try {
-    const res = await fetch(API_BASE + '/settings', {
-      headers: { 'X-API-Key': key },
+    const res = await fetch('/api/settings', {
+      headers: { 'Accept': 'application/json', 'X-API-Key': key },
     });
-    return res.status !== 403;
+    if (res.status === 403) return false;
+    const ct = res.headers.get('content-type') || '';
+    return res.ok && ct.includes('application/json');
   } catch {
     return false;
   }

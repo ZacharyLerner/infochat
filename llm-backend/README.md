@@ -83,6 +83,7 @@ cp .env .env.local   # optional: work from a copy
 | `FILE_SERVER_API_KEY` | No | _(none)_ | Auth key for the file server |
 | `CHAT_SERVER_URL` | No | `http://10.140.2.30:3000` | Downstream chat frontend to notify on workspace events |
 | `CHAT_SERVER_API_KEY` | No | _(none)_ | Auth key for the chat server |
+| `ENABLE_API_DOCS` | No | `false` | Serve Swagger UI (`/docs`), ReDoc (`/redoc`), and the raw OpenAPI schema (`/openapi.json`). These routes are unauthenticated by design (FastAPI serves them internally, bypassing this app's auth dependency), so leave disabled in production. |
 
 ---
 
@@ -188,7 +189,7 @@ All endpoints require the header:
 X-API-Key: <ADMIN_API_KEY>
 ```
 
-Interactive Swagger docs are available at:
+Interactive Swagger docs are available at (only when `ENABLE_API_DOCS=1` is set in `.env` — disabled by default since these routes are unauthenticated):
 ```
 http://localhost:3001/docs
 ```
