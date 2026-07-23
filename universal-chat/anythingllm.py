@@ -136,7 +136,7 @@ async def stream_chat(
     followup_suffix is passed as prompt_suffix to the RAG backend so it is
     appended to the LLM prompt only — never used for vector retrieval.
     """
-    url = f"{API_URL}/workspace/{slug}/query/stream"
+    url = f"{API_URL}/api/workspace/{slug}/query/stream"
     payload: dict = {"question": message}
     combined_suffix = followup_suffix + email_suffix
     if combined_suffix:
@@ -195,7 +195,7 @@ async def stream_chat_session(
     into the message as additional context so the LLM can ground its answer
     in the uploaded document.
     """
-    url = f"{API_URL}/workspace/{slug}/chat/{session_id}/stream"
+    url = f"{API_URL}/api/workspace/{slug}/chat/{session_id}/stream"
     history_count = len((history or [])[-6:])
 
     # Build the effective query message ──────────────────────────────────────

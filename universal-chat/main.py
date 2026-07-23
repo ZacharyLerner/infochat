@@ -180,7 +180,7 @@ async def create_chat_session(slug: str, db: Session = Depends(get_db)):
     try:
         async with _httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{API_URL}/workspace/{slug}/chat/session",
+                f"{API_URL}/api/workspace/{slug}/chat/session",
                 headers=HEADERS,
             )
             resp.raise_for_status()
