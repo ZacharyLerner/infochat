@@ -568,10 +568,6 @@ closeModalBtn.addEventListener('click', () => {
   createModal.classList.add('hidden');
 });
 
-createModal.addEventListener('click', (e) => {
-  if (e.target === createModal) createModal.classList.add('hidden');
-});
-
 createWorkspaceForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = formToObj(createWorkspaceForm, [

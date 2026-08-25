@@ -52,7 +52,11 @@ engines:
   - name: bing
     engine: bing
     categories: general
-    disabled: false
+    # Disabled: Bing's scraped HTML results silently ignore the `site:`
+    # operator when requested from this host, causing off-domain results
+    # to leak into site-restricted searches (e.g. searxng_query_suffix =
+    # "site:uri.edu"). google/duckduckgo/wikipedia correctly honor `site:`.
+    disabled: true
     weight: 1
 
   - name: duckduckgo
