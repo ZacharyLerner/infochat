@@ -38,7 +38,7 @@ def init_db():
                 max_tokens   INTEGER NOT NULL DEFAULT 1024,
                 searxng_enabled INTEGER NOT NULL DEFAULT 0,
                 searxng_num_results INTEGER NOT NULL DEFAULT 3,
-                searxng_query_suffix TEXT NOT NULL DEFAULT '',
+                searxng_query_suffix TEXT NOT NULL DEFAULT 'site:uri.edu',
                 rewrite_model TEXT NOT NULL DEFAULT '',
                 rewrite_prompt TEXT NOT NULL DEFAULT ''
             )
