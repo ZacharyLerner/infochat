@@ -42,7 +42,10 @@ def build_embed_model(embed_model: str, api_key: str = "", embed_api_key: str = 
         explicitly overriding OPENAI_API_BASE so the university gateway is bypassed.
         Example: 'direct-openai/text-embedding-3-large'
       - anything else — routes through the configured gateway (config.API_BASE)
-        using api_key.
+        using embed_api_key if set, otherwise falling back to api_key. This lets
+        a workspace's embedding model live under a different LiteLLM key/project
+        than its chat model (e.g. embed_model on its_rhodyrag_dev while llm_model
+        is on its_sd_discord_bot_dev).
         Example: 'openai/its_rhodyrag_prod/titan-embed-text-v2-us'
     """
     if embed_model.startswith("direct-openai/"):
@@ -56,7 +59,7 @@ def build_embed_model(embed_model: str, api_key: str = "", embed_api_key: str = 
     return LiteLLMEmbedding(
         model_name=embed_model,
         api_base=config.API_BASE,
-        api_key=api_key,
+        api_key=embed_api_key or api_key,
     )
 
 
