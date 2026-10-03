@@ -35,7 +35,6 @@ def init_db():
                 chunk_overlap INTEGER NOT NULL DEFAULT 104,
                 embed_model  TEXT NOT NULL DEFAULT '',
                 embed_api_key        TEXT NOT NULL DEFAULT '',
-                max_tokens   INTEGER NOT NULL DEFAULT 1024,
                 searxng_enabled INTEGER NOT NULL DEFAULT 0,
                 rewrite_model TEXT NOT NULL DEFAULT '',
                 rewrite_prompt TEXT NOT NULL DEFAULT ''
@@ -55,7 +54,6 @@ def init_db():
                 chunk_overlap INTEGER NOT NULL DEFAULT 104,
                 embed_model  TEXT NOT NULL DEFAULT '',
                 embed_api_key        TEXT NOT NULL DEFAULT '',
-                max_tokens   INTEGER NOT NULL DEFAULT 1024,
                 searxng_enabled INTEGER NOT NULL DEFAULT 0,
                 rewrite_model TEXT NOT NULL DEFAULT '',
                 rewrite_prompt TEXT NOT NULL DEFAULT ''
@@ -69,14 +67,12 @@ def init_db():
         # --- Migrations: add columns that may not exist yet ---
         _migrate_columns(conn, "workspaces", [
             ("embed_api_key", "TEXT NOT NULL DEFAULT ''"),
-            ("max_tokens", "INTEGER NOT NULL DEFAULT 1024"),
             ("searxng_enabled", "INTEGER NOT NULL DEFAULT 0"),
             ("rewrite_model", "TEXT NOT NULL DEFAULT ''"),
             ("rewrite_prompt", "TEXT NOT NULL DEFAULT ''"),
         ])
         _migrate_columns(conn, "settings", [
             ("embed_api_key", "TEXT NOT NULL DEFAULT ''"),
-            ("max_tokens", "INTEGER NOT NULL DEFAULT 1024"),
             ("searxng_enabled", "INTEGER NOT NULL DEFAULT 0"),
             ("rewrite_model", "TEXT NOT NULL DEFAULT ''"),
             ("rewrite_prompt", "TEXT NOT NULL DEFAULT ''"),
@@ -104,7 +100,7 @@ def update_settings(**fields) -> dict:
     allowed = {
         "llm_model", "api_key", "temperature", "system_prompt",
         "top_n", "similarity_threshold", "chunk_size", "chunk_overlap",
-        "embed_model", "embed_api_key", "max_tokens",
+        "embed_model", "embed_api_key",
         "searxng_enabled", "rewrite_model", "rewrite_prompt",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
@@ -152,7 +148,6 @@ def create_workspace(
     chunk_overlap: int = 104,
     embed_model: str = "",
     embed_api_key: str = "",
-    max_tokens: int = 1024,
     searxng_enabled: int = 0,
     rewrite_model: str = "",
     rewrite_prompt: str = "",
@@ -166,9 +161,9 @@ def create_workspace(
             """INSERT INTO workspaces
                (slug, name, llm_model, api_key, temperature, system_prompt,
                 top_n, similarity_threshold, chunk_size, chunk_overlap,
-                embed_model, embed_api_key, max_tokens,
+                embed_model, embed_api_key,
                 searxng_enabled, rewrite_model, rewrite_prompt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 slug,
                 name,
@@ -182,7 +177,6 @@ def create_workspace(
                 chunk_overlap if chunk_overlap is not None else defaults["chunk_overlap"],
                 embed_model or defaults["embed_model"],
                 embed_api_key if embed_api_key is not None else defaults["embed_api_key"],
-                max_tokens if max_tokens is not None else defaults.get("max_tokens", 1024),
                 searxng_enabled if searxng_enabled is not None else defaults.get("searxng_enabled", 0),
                 rewrite_model or defaults.get("rewrite_model", ""),
                 rewrite_prompt or defaults.get("rewrite_prompt", ""),
@@ -204,7 +198,7 @@ def update_workspace(slug: str, **fields) -> Optional[dict]:
     """Update any subset of settings fields. Returns the updated workspace."""
     allowed = {
         "name", "llm_model", "api_key", "temperature", "system_prompt",
-        "top_n", "similarity_threshold", "embed_api_key", "max_tokens",
+        "top_n", "similarity_threshold", "embed_api_key",
         "searxng_enabled", "rewrite_model", "rewrite_prompt",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}

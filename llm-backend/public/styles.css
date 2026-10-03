@@ -431,6 +431,7 @@ td code {
 }
 
 .form-row input,
+.form-row select,
 .form-row textarea {
   padding: 8px 10px;
   border: 1px solid var(--border);
@@ -444,6 +445,7 @@ td code {
 }
 
 .form-row input:focus,
+.form-row select:focus,
 .form-row textarea:focus {
   border-color: #888;
 }
@@ -465,6 +467,43 @@ td code {
   gap: 14px;
   padding-top: 8px;
   border-top: 1px solid var(--border-light);
+}
+
+/* Create-workspace steps */
+.btn-primary.loading::before {
+  content: '';
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 8px;
+  vertical-align: -1px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+.wizard-progress {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.wizard-step {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px 24px;
+}
+
+.wizard-step .form-row input,
+.wizard-step .form-row select,
+.wizard-step .form-row textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .status-msg {

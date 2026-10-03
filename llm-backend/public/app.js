@@ -316,10 +316,10 @@ workspaceSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = formToObj(workspaceSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
-    'similarity_threshold', 'system_prompt', 'embed_api_key', 'max_tokens',
+    'similarity_threshold', 'system_prompt', 'embed_api_key',
     'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold']);
   data.searxng_enabled = workspaceSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(wsSettingsMsg, 'Saving...');
@@ -347,12 +347,110 @@ newWorkspaceBtn.addEventListener('click', async () => {
   createModal.classList.remove('hidden');
 
   // Pre-fill with current global defaults so the admin sees what will be used
+  resetModelSelects();
+  showCreateStep(1);
   const res = await apiFetch('/settings');
   if (res.ok) {
     const settings = await res.json();
     fillForm(createWorkspaceForm, settings);
   }
 });
+
+// --- Create-workspace steps: 1 name & keys, 2 models & settings, 3 other ---
+const CREATE_STEP_TITLES = {
+  1: 'Workspace & Keys',
+  2: 'Models & Settings',
+  3: 'Other Settings',
+};
+const createBackBtn   = document.getElementById('create-back-btn');
+const createNextBtn   = document.getElementById('create-next-btn');
+const createSubmitBtn = document.getElementById('create-submit-btn');
+const createStepLabel = document.getElementById('create-step-label');
+let createStep = 1;
+
+function showCreateStep(n) {
+  createStep = n;
+  createWorkspaceForm.querySelectorAll('.wizard-step').forEach(el => {
+    el.classList.toggle('hidden', Number(el.dataset.step) !== n);
+  });
+  createStepLabel.textContent = `Step ${n} of 3 \u2014 ${CREATE_STEP_TITLES[n]}`;
+  createBackBtn.classList.toggle('hidden', n === 1);
+  createNextBtn.classList.toggle('hidden', n === 3);
+  createSubmitBtn.classList.toggle('hidden', n !== 3);
+  createWorkspaceMsg.textContent = '';
+}
+
+// Populate the model dropdowns with whatever the entered API key can access
+const _REWRITE_OFF_OPTION = '<option value="">Disabled</option>';
+const _DEFAULT_OPTION = '<option value="">Use global default</option>';
+
+function setSelectOptions(select, models, defaultOption = _DEFAULT_OPTION) {
+  select.innerHTML = defaultOption;
+  models.forEach(m => select.add(new Option(m, m)));
+}
+
+function resetModelSelects() {
+  ['llm_model', 'embed_model'].forEach(name => {
+    createWorkspaceForm.elements[name].innerHTML = _DEFAULT_OPTION;
+  });
+  createWorkspaceForm.elements['rewrite_model'].innerHTML = _REWRITE_OFF_OPTION;
+}
+
+// Returns true when the dropdowns were filled; shows an error on step 1 if not.
+async function loadModelOptions() {
+  const key = createWorkspaceForm.elements['api_key'].value.trim();
+  const res = await apiFetch('/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: key }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showMsg(createWorkspaceMsg, `Could not load models: ${err.detail || res.status}`, 'error');
+    return false;
+  }
+  const { llm_models, embedding_models } = await res.json();
+  setSelectOptions(createWorkspaceForm.elements['llm_model'], llm_models);
+  setSelectOptions(createWorkspaceForm.elements['embed_model'], embedding_models);
+  setSelectOptions(createWorkspaceForm.elements['rewrite_model'], llm_models, _REWRITE_OFF_OPTION);
+  return true;
+}
+
+async function createNext() {
+  if (createStep === 1) {
+    const nameEl = createWorkspaceForm.elements['name'];
+    const keyEl = createWorkspaceForm.elements['api_key'];
+    if (!nameEl.value.trim()) {
+      showMsg(createWorkspaceMsg, 'Enter a workspace name.', 'error');
+      nameEl.focus();
+      return;
+    }
+    if (!keyEl.value.trim()) {
+      showMsg(createWorkspaceMsg, 'Enter an API key to load the available models.', 'error');
+      keyEl.focus();
+      return;
+    }
+    createNextBtn.disabled = true;
+    createNextBtn.classList.add('loading');
+    createNextBtn.textContent = 'Loading models...';
+    createWorkspaceMsg.textContent = '';
+    let ok = false;
+    try {
+      ok = await loadModelOptions();
+    } catch (err) {
+      showMsg(createWorkspaceMsg, `Could not load models: ${err.message}`, 'error');
+    } finally {
+      createNextBtn.disabled = false;
+      createNextBtn.classList.remove('loading');
+      createNextBtn.textContent = 'Next';
+    }
+    if (!ok) return;
+  }
+  showCreateStep(createStep + 1);
+}
+
+createNextBtn.addEventListener('click', createNext);
+createBackBtn.addEventListener('click', () => showCreateStep(createStep - 1));
 
 closeModalBtn.addEventListener('click', () => {
   createModal.classList.add('hidden');
@@ -364,13 +462,15 @@ createModal.addEventListener('click', (e) => {
 
 createWorkspaceForm.addEventListener('submit', async (e) => {
   e.preventDefault();
+  // Enter on an earlier step advances instead of creating
+  if (createStep < 3) return createNext();
   const data = formToObj(createWorkspaceForm, [
     'name', 'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'embed_model', 'embed_api_key', 'system_prompt',
     'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap']);
   data.searxng_enabled = createWorkspaceForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(createWorkspaceMsg, 'Creating...');
@@ -669,10 +769,10 @@ globalSettingsForm.addEventListener('submit', async (e) => {
   const data = formToObj(globalSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'embed_model', 'embed_api_key', 'system_prompt',
     'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap']);
   data.searxng_enabled = globalSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(globalSettingsMsg, 'Saving...');

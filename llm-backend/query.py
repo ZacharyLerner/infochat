@@ -63,9 +63,8 @@ _chat_sessions_lock = _threading.Lock()
 
 
 # Gateway model strings are not in LiteLLM's registry, so it falls back to a
-# 2048-token context window. With max_tokens near that ceiling, LlamaIndex
-# calculates negative available context and raises ValueError before the query
-# reaches the LLM. We subclass to override the metadata property with a fixed
+# 2048-token context window, and LlamaIndex can calculate negative available
+# context and raise ValueError before the query reaches the LLM. We subclass to override the metadata property with a fixed
 # large window; LlamaIndex only uses this for prompt budgeting — the gateway
 # enforces the real model limit.
 _CONTEXT_WINDOW = 128_000
@@ -87,14 +86,13 @@ class _GatewayLiteLLM(LiteLLM):
         )
 
 
-def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "", max_tokens: int = 1024) -> LiteLLM:
+def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "") -> LiteLLM:
     return _GatewayLiteLLM(
         model=llm_model,
         api_base=config.API_BASE,
         api_key=api_key,
         temperature=temperature,
         system_prompt=system_prompt or None,
-        max_tokens=max_tokens,
     )
 
 
@@ -362,7 +360,6 @@ async def stream_chat_session(
             workspace["api_key"],
             workspace["temperature"],
             workspace["system_prompt"],
-            workspace.get("max_tokens", 1024),
         )
 
         full_response = ""
@@ -474,7 +471,6 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
         workspace["api_key"],
         workspace["temperature"],
         workspace["system_prompt"],
-        workspace.get("max_tokens", 1024),
     )
 
     response = await asyncio.to_thread(llm.chat, messages)
@@ -583,7 +579,6 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             workspace["api_key"],
             workspace["temperature"],
             workspace["system_prompt"],
-            workspace.get("max_tokens", 1024),
         )
         try:
             response_gen = await llm.astream_chat(messages)

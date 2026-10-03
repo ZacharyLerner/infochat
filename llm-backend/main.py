@@ -116,6 +116,47 @@ def verify_auth():
     return {"status": "ok"}
 
 
+# --- Model discovery ---------------------------------------------------------
+class ListModelsRequest(BaseModel):
+    api_key: str = Field(..., description="API key to look up available models for.")
+
+
+@app.post("/models", summary="List models available to an API key")
+async def list_models(body: ListModelsRequest):
+    """Ask the LLM gateway which models the given key can use.
+
+    Each gateway entry carries a "mode" (chat, embedding, ...). Entries without
+    one are classified by name ("embed" in the id). Other modes (image, audio,
+    rerank, ...) are left out.
+    """
+    try:
+        async with _httpx.AsyncClient(timeout=15) as client:
+            res = await client.get(
+                f"{config.API_BASE.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {body.api_key}"},
+            )
+    except _httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach LLM gateway: {exc}")
+
+    if res.status_code in (401, 403):
+        raise HTTPException(status_code=401, detail="The gateway rejected this API key.")
+    if res.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"LLM gateway returned {res.status_code}.")
+
+    llm_models, embedding_models = set(), set()
+    for m in res.json().get("data", []):
+        model_id = m.get("id")
+        if not model_id:
+            continue
+        mode = m.get("mode") or ("embedding" if "embed" in model_id.lower() else "chat")
+        if mode == "chat":
+            llm_models.add(model_id)
+        elif mode == "embedding":
+            embedding_models.add(model_id)
+    llm_models, embedding_models = sorted(llm_models), sorted(embedding_models)
+    return {"llm_models": llm_models, "embedding_models": embedding_models}
+
+
 
 # --- Pydantic models ---------------------------------------------------------
 
@@ -131,7 +172,6 @@ class CreateWorkspace(BaseModel):
     chunk_overlap: Optional[int] = Field(None, description="Token overlap between consecutive chunks. Locked after creation for the same reason as chunk_size.")
     embed_model: Optional[str] = Field(None, description="Embedding model for this workspace. Locked after creation — changing it would cause vector dimension mismatches. Falls back to the global default if blank. Use 'direct-openai/<model>' to bypass the gateway.")
     embed_api_key: Optional[str] = Field(None, description="API key for the embedding model. Only needed when using a direct-openai/ embedding model that requires its own key separate from the LLM gateway key.")
-    max_tokens: Optional[int] = Field(None, description="Maximum number of tokens the LLM may generate in a single response.")
     searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation for every query in this workspace.")
     rewrite_model: Optional[str] = Field(None, description="LiteLLM model string for query rewriting (e.g. 'openai/gpt-4o-mini'). Leave blank to disable rewriting.")
     rewrite_prompt: Optional[str] = Field(None, description="System prompt for the query rewriter. Leave blank to use the built-in default.")
@@ -147,7 +187,6 @@ class UpdateWorkspace(BaseModel):
     top_n: Optional[int] = Field(None)
     similarity_threshold: Optional[float] = Field(None)
     embed_api_key: Optional[str] = Field(None)
-    max_tokens: Optional[int] = Field(None)
     searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation.")
     rewrite_model: Optional[str] = Field(None, description="Model for query rewriting. Empty string disables rewriting.")
     rewrite_prompt: Optional[str] = Field(None, description="Custom rewrite prompt. Empty string uses built-in default.")
@@ -170,7 +209,6 @@ class UpdateSettings(BaseModel):
     chunk_overlap: Optional[int] = None
     embed_model: Optional[str] = None
     embed_api_key: Optional[str] = None
-    max_tokens: Optional[int] = None
     searxng_enabled: Optional[bool] = None
     rewrite_model: Optional[str] = None
     rewrite_prompt: Optional[str] = None
@@ -211,7 +249,6 @@ def create_workspace(body: CreateWorkspace):
         chunk_overlap=body.chunk_overlap if body.chunk_overlap is not None else 104,
         embed_model=body.embed_model or "",
         embed_api_key=body.embed_api_key or "",
-        max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
         searxng_enabled=int(body.searxng_enabled) if body.searxng_enabled is not None else 0,
         rewrite_model=body.rewrite_model or "",
         rewrite_prompt=body.rewrite_prompt or "",

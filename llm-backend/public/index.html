@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RhodyRAG Admin</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=5" />
 </head>
 <body>
 
@@ -104,10 +104,6 @@
             <div class="form-row">
               <label>Similarity Threshold</label>
               <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
-            </div>
-            <div class="form-row">
-              <label>Max Tokens</label>
-              <input type="number" name="max_tokens" min="1" />
             </div>
             <div class="form-row">
               <label>Embed API Key</label>
@@ -226,76 +222,86 @@
             <button id="close-modal-btn" class="link-btn">&times;</button>
           </div>
           <form id="create-workspace-form" class="settings-form">
-            <div class="form-row">
-              <label>Name <span class="required">*</span></label>
-              <input type="text" name="name" required />
-            </div>
-            <div class="form-row">
-              <label>LLM Model</label>
-              <input type="text" name="llm_model" placeholder="Leave blank to use global default" />
-            </div>
-            <div class="form-row">
-              <label>API Key</label>
-              <input type="password" name="api_key" />
-            </div>
-            <div class="form-row">
-              <label>Temperature</label>
-              <input type="number" name="temperature" step="0.01" min="0" max="1" placeholder="e.g. 0.7" />
-            </div>
-            <div class="form-row">
-              <label>Top N Chunks</label>
-              <input type="number" name="top_n" min="1" />
-            </div>
-            <div class="form-row">
-              <label>Similarity Threshold</label>
-              <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
-            </div>
-            <div class="form-row">
-              <label>Max Tokens</label>
-              <input type="number" name="max_tokens" min="1" placeholder="e.g. 1024" />
-            </div>
-            <div class="form-row">
-              <label>Chunk Size <span class="muted">(locked after creation)</span></label>
-              <input type="number" name="chunk_size" placeholder="e.g. 1024" />
-            </div>
-            <div class="form-row">
-              <label>Chunk Overlap <span class="muted">(locked after creation)</span></label>
-              <input type="number" name="chunk_overlap" placeholder="e.g. 104" />
-            </div>
-            <div class="form-row">
-              <label>Embed Model <span class="muted">(locked after creation)</span></label>
-              <input type="text" name="embed_model" placeholder="Leave blank to use global default" />
-            </div>
-            <div class="form-row">
-              <label>Embed API Key</label>
-              <input type="password" name="embed_api_key" />
-            </div>
-            <div class="form-row full-width">
-              <label>System Prompt</label>
-              <textarea name="system_prompt" rows="3" placeholder="Leave blank to use global default"></textarea>
+            <div class="wizard-progress" id="create-step-label">Step 1 of 3 &mdash; Workspace &amp; Keys</div>
+
+            <!-- Step 1: name + keys -->
+            <div class="wizard-step" data-step="1">
+              <div class="form-row">
+                <label>Name <span class="required">*</span></label>
+                <input type="text" name="name" required />
+              </div>
+              <div class="form-row">
+                <label>API Key <span class="required">*</span></label>
+                <input type="password" name="api_key" />
+              </div>
+              <div class="form-row">
+                <label>Embed API Key</label>
+                <input type="password" name="embed_api_key" />
+              </div>
             </div>
 
-            <div class="form-section-divider">Web Search</div>
-            <div class="form-row">
-              <label>Enable SearXNG Web Search</label>
-              <label class="toggle-label">
-                <input type="checkbox" name="searxng_enabled" />
-                <span>Augment queries with live web results</span>
-              </label>
+            <!-- Step 2: models + retrieval settings -->
+            <div class="wizard-step hidden" data-step="2">
+              <div class="form-row">
+                <label>LLM Model</label>
+                <select name="llm_model"><option value="">Use global default</option></select>
+              </div>
+              <div class="form-row">
+                <label>Embed Model <span class="muted">(locked after creation)</span></label>
+                <select name="embed_model"><option value="">Use global default</option></select>
+              </div>
+              <div class="form-row">
+                <label>Temperature</label>
+                <input type="number" name="temperature" step="0.01" min="0" max="1" placeholder="e.g. 0.7" />
+              </div>
+              <div class="form-row">
+                <label>Top N Chunks</label>
+                <input type="number" name="top_n" min="1" />
+              </div>
+              <div class="form-row">
+                <label>Similarity Threshold</label>
+                <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
+              </div>
+              <div class="form-row">
+                <label>Chunk Size <span class="muted">(locked after creation)</span></label>
+                <input type="number" name="chunk_size" placeholder="e.g. 1024" />
+              </div>
+              <div class="form-row">
+                <label>Chunk Overlap <span class="muted">(locked after creation)</span></label>
+                <input type="number" name="chunk_overlap" placeholder="e.g. 104" />
+              </div>
+              <div class="form-row full-width">
+                <label>System Prompt</label>
+                <textarea name="system_prompt" rows="3" placeholder="Leave blank to use global default"></textarea>
+              </div>
             </div>
 
-            <div class="form-section-divider">Query Rewriting</div>
-            <div class="form-row">
-              <label>Rewrite Model <span class="muted">(leave blank to disable)</span></label>
-              <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
-            </div>
-            <div class="form-row full-width">
-              <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
-              <textarea name="rewrite_prompt" rows="4" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+            <!-- Step 3: other settings -->
+            <div class="wizard-step hidden" data-step="3">
+              <div class="form-section-divider">Web Search</div>
+              <div class="form-row">
+                <label>Enable SearXNG Web Search</label>
+                <label class="toggle-label">
+                  <input type="checkbox" name="searxng_enabled" />
+                  <span>Augment queries with live web results</span>
+                </label>
+              </div>
+
+              <div class="form-section-divider">Query Rewriting</div>
+              <div class="form-row">
+                <label>Rewrite Model <span class="muted">(choose Disabled to turn off)</span></label>
+                <select name="rewrite_model"><option value="">Disabled</option></select>
+              </div>
+              <div class="form-row full-width">
+                <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
+                <textarea name="rewrite_prompt" rows="4" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
+              </div>
             </div>
 
             <div class="form-actions">
-              <button type="submit" class="btn-primary">Create Workspace</button>
+              <button type="button" id="create-back-btn" class="btn-secondary hidden">Back</button>
+              <button type="button" id="create-next-btn" class="btn-primary">Next</button>
+              <button type="submit" id="create-submit-btn" class="btn-primary hidden">Create Workspace</button>
               <span id="create-workspace-msg" class="status-msg"></span>
             </div>
           </form>
@@ -327,10 +333,6 @@
           <div class="form-row">
             <label>Similarity Threshold</label>
             <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
-          </div>
-          <div class="form-row">
-            <label>Max Tokens</label>
-            <input type="number" name="max_tokens" min="1" />
           </div>
           <div class="form-row">
             <label>Chunk Size</label>
@@ -382,6 +384,6 @@
     </main>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

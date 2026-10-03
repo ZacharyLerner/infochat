@@ -1,0 +1,20 @@
+# Development overrides — live code reload, no image rebuild per change.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Python edits restart uvicorn automatically; edits to public/ are served from
+# disk, so a browser refresh is enough. Rebuild (docker compose up -d --build)
+# only when requirements.txt or the Dockerfile change.
+
+services:
+  backend:
+    volumes:
+      - .:/app
+      # Keep the data mounts from docker-compose.yml pointing at the same files
+      - ./lancedb:/app/lancedb
+      - ./settings.db:/app/settings.db
+      - ./docs.json:/app/docs.json
+    command: >
+      python -m uvicorn main:app --host 0.0.0.0 --port 3001
+      --reload --reload-dir /app --reload-exclude venv
