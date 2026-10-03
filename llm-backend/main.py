@@ -20,13 +20,10 @@ _httpx_logger.setLevel(_logging.WARNING)
 
 import datetime
 import json
-import os
-import tempfile
-import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Security, Depends
 from fastapi.responses import StreamingResponse, FileResponse
@@ -40,104 +37,21 @@ import embedding
 import manager
 import query
 
-# --- Doc tracking (JSON file) ------------------------------------------------
-DOCS_FILE = Path("docs.json")
-_docs_lock = threading.Lock()
-
-# --- Query log (per-workspace JSON files in logs/) ---------------------------
-LOGS_DIR = Path("logs")
-_logs_lock = threading.Lock()
-
-
-def _log_path(slug: str) -> Path:
-    return LOGS_DIR / f"{slug}.json"
-
-
-def _read_log(slug: str) -> list:
-    """Read log entries for a workspace. Caller must hold _logs_lock."""
-    path = _log_path(slug)
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            return []
-    return []
-
-
-def _append_log(slug: str, entry: dict) -> None:
-    """Append a single log entry atomically. Safe to call from a thread."""
-    with _logs_lock:
-        LOGS_DIR.mkdir(exist_ok=True)
-        data = _read_log(slug)
-        data.append(entry)
-        text = json.dumps(data, indent=2)
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=LOGS_DIR, suffix=".tmp")
-        try:
-            with os.fdopen(tmp_fd, "w") as f:
-                f.write(text)
-            try:
-                os.replace(tmp_path, _log_path(slug))
-            except OSError:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                _log_path(slug).write_text(text)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-
-
-def _read_docs() -> Dict[str, Any]:
-    if DOCS_FILE.exists():
-        return json.loads(DOCS_FILE.read_text())
-    return {}
-
-
-def _write_docs(data: Dict[str, Any]):
-    """Write docs.json under the _docs_lock (caller must hold the lock).
-
-    Uses a write-to-temp-then-rename strategy for atomicity on native
-    filesystems. On Docker bind-mounts (macOS virtiofs/gRPC-FUSE), os.replace()
-    across the overlay boundary raises EBUSY, so we fall back to writing
-    directly to the target path — safe because the caller already holds
-    _docs_lock, which serialises all reads and writes.
-    """
-    text = json.dumps(data, indent=2)
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=DOCS_FILE.parent, suffix=".tmp")
-    try:
-        with os.fdopen(tmp_fd, "w") as f:
-            f.write(text)
-        try:
-            os.replace(tmp_path, DOCS_FILE)
-        except OSError:
-            # Bind-mount atomic rename not supported (Docker on macOS).
-            # Fall back to direct overwrite — safe under _docs_lock.
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            DOCS_FILE.write_text(text)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
 # --- Lifespan ----------------------------------------------------------------
 def _ensure_indexes() -> None:
     """Create S3 Vectors indexes for any workspace that doesn't have one yet
     (e.g. workspaces created before vectors moved to S3)."""
-    for ws in db.list_workspaces():
+    log = _logging.getLogger(__name__)
+    try:
+        workspaces = db.list_workspaces()
+    except Exception as exc:
+        log.warning("could not list workspaces from S3: %s", exc)
+        return
+    for ws in workspaces:
         try:
             embedding.ensure_workspace_index(ws)
         except Exception as exc:
-            _logging.getLogger(__name__).warning(
+            log.warning(
                 "could not ensure S3 index for workspace '%s': %s", ws["slug"], exc
             )
 
@@ -145,10 +59,6 @@ def _ensure_indexes() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
-    await asyncio.to_thread(db.init_db)
-    if not await asyncio.to_thread(DOCS_FILE.exists):
-        await asyncio.to_thread(_write_docs, {})
-    LOGS_DIR.mkdir(exist_ok=True)
     await asyncio.to_thread(_ensure_indexes)
     yield
 
@@ -164,7 +74,7 @@ async def verify_admin_key(key: Optional[str] = Security(api_key_header)):
 
 
 app = FastAPI(
-    title="LLM RAG Backend",
+    title="Infochat",
     version="1.0.0",
     lifespan=lifespan,
     # /docs, /redoc, and /openapi.json are registered internally by FastAPI
@@ -304,21 +214,36 @@ class UpdateSettings(BaseModel):
     rewrite_prompt: Optional[str] = None
 
 
+# --- API key masking ---------------------------------------------------------
+# Gateway keys are never sent back to the browser. Responses carry an empty
+# value plus a "<field>_hint" (last 4 chars); the admin UI leaves the field
+# blank, and blank fields are not sent on save, so the stored key is kept.
+_SECRET_FIELDS = ("api_key", "embed_api_key")
+
+
+def _mask_keys(obj: dict) -> dict:
+    masked = dict(obj)
+    for f in _SECRET_FIELDS:
+        value = masked.get(f) or ""
+        masked[f] = ""
+        masked[f"{f}_hint"] = f"…{value[-4:]}" if value else ""
+    return masked
+
+
 @api_router.get("/settings", summary="Get global settings")
 def get_settings():
-    return db.get_settings()
+    return _mask_keys(db.get_settings())
 
 
 @api_router.put("/settings", summary="Update global settings")
 def update_settings(body: UpdateSettings):
     fields = body.model_dump()
-    # Cast bool → int for SQLite INTEGER column
     if fields.get("searxng_enabled") is not None:
         fields["searxng_enabled"] = int(fields["searxng_enabled"])
     # Clamp num_results to 1–10
     if fields.get("searxng_num_results") is not None:
         fields["searxng_num_results"] = max(1, min(int(fields["searxng_num_results"]), 10))
-    return db.update_settings(**fields)
+    return _mask_keys(db.update_settings(**fields))
 
 
 @api_router.get("/defaults", summary="Get built-in default prompt values")
@@ -336,7 +261,7 @@ def get_defaults():
 
 @api_router.get("/workspaces", summary="List all workspaces")
 def list_workspaces():
-    return db.list_workspaces()
+    return [_mask_keys(ws) for ws in db.list_workspaces()]
 
 
 @api_router.post("/workspace", summary="Create a new workspace")
@@ -367,7 +292,7 @@ def create_workspace(body: CreateWorkspace):
         db.delete_workspace(ws["slug"])
         raise HTTPException(status_code=502, detail=f"Could not create vector index: {exc}")
     manager.on_workspace_created(slug=ws["slug"], name=ws["name"])
-    return ws
+    return _mask_keys(ws)
 
 
 @api_router.get("/workspace/{slug}", summary="Get workspace details")
@@ -375,7 +300,7 @@ def get_workspace(slug: str):
     ws = db.get_workspace(slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    return ws
+    return _mask_keys(ws)
 
 
 @api_router.put("/workspace/{slug}", summary="Update a workspace")
@@ -383,13 +308,12 @@ def update_workspace(slug: str, body: UpdateWorkspace):
     if db.get_workspace(slug) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     fields = body.model_dump()
-    # Cast bool → int for SQLite INTEGER column
     if fields.get("searxng_enabled") is not None:
         fields["searxng_enabled"] = int(fields["searxng_enabled"])
     ws = db.update_workspace(slug, **fields)
     if body.name is not None:
         manager.on_workspace_renamed(slug=slug, new_name=body.name)
-    return ws
+    return _mask_keys(ws)
 
 
 @api_router.delete("/workspace/{slug}", summary="Delete a workspace")
@@ -405,22 +329,7 @@ async def delete_workspace(slug: str):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not delete vector index: {exc}")
 
-    # Remove doc tracking records (blocking file I/O — offload to thread)
-    def _remove_docs():
-        with _docs_lock:
-            data = _read_docs()
-            data.pop(slug, None)
-            _write_docs(data)
-    await asyncio.to_thread(_remove_docs)
-
-    # Remove query log file for this workspace
-    def _remove_log():
-        with _logs_lock:
-            p = _log_path(slug)
-            if p.exists():
-                p.unlink()
-    await asyncio.to_thread(_remove_log)
-
+    # Removes the workspace's settings, document records and logs
     await asyncio.to_thread(db.delete_workspace, slug)
     manager.on_workspace_deleted(slug=slug)  # fire-and-forget background thread
     return {"status": "ok", "slug": slug}
@@ -428,19 +337,14 @@ async def delete_workspace(slug: str):
 
 # --- Embed -------------------------------------------------------------------
 def _record_doc(slug: str, doc_id: str, filename: str, chunks: int) -> None:
-    """Sync helper: append a doc record to docs.json under the lock."""
+    """Sync helper: append a doc record to the workspace's docs.json in S3."""
     from datetime import datetime, timezone
-    with _docs_lock:
-        data = _read_docs()
-        if slug not in data:
-            data[slug] = []
-        data[slug].append({
-            "doc_id": doc_id,
-            "filename": filename,
-            "chunks_embedded": chunks,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        })
-        _write_docs(data)
+    db.add_doc(slug, {
+        "doc_id": doc_id,
+        "filename": filename,
+        "chunks_embedded": chunks,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 @api_router.post("/workspace/{slug}/embed", summary="Upload and embed a file")
@@ -465,20 +369,10 @@ async def embed_file(slug: str, file: UploadFile = File(..., description="File t
     if chunks == 0:
         raise HTTPException(status_code=422, detail="No text could be extracted")
 
-    # Record in docs.json (blocking file I/O — offload to thread)
     await asyncio.to_thread(_record_doc, slug, doc_id, filename, chunks)
 
     return {"status": "ok", "slug": slug, "filename": filename,
             "doc_id": doc_id, "chunks_embedded": chunks}
-
-
-def _remove_doc_from_json(slug: str, doc_id: str) -> None:
-    """Sync helper: remove a doc record from docs.json under the lock."""
-    with _docs_lock:
-        data = _read_docs()
-        if slug in data:
-            data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
-        _write_docs(data)
 
 
 @api_router.delete("/workspace/{slug}/embed/{doc_id:path}", summary="Delete an embedded file")
@@ -496,11 +390,7 @@ async def delete_embed(slug: str, doc_id: str):
 
     # S3 Vectors deletes by key, and keys are derived from the chunk count
     # recorded in docs.json at embed time.
-    def _find_record():
-        with _docs_lock:
-            data = _read_docs()
-        return next((d for d in data.get(slug, []) if d.get("doc_id") == doc_id), None)
-    record = await asyncio.to_thread(_find_record)
+    record = await asyncio.to_thread(db.get_doc, slug, doc_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -508,8 +398,7 @@ async def delete_embed(slug: str, doc_id: str):
         embedding.delete_workspace_file, slug, doc_id, record.get("chunks_embedded") or 0
     )
 
-    # Keep docs.json in sync (blocking file I/O — offload to thread)
-    await asyncio.to_thread(_remove_doc_from_json, slug, doc_id)
+    await asyncio.to_thread(db.remove_doc, slug, doc_id)
 
     return {"status": "ok", "slug": slug, "doc_id": doc_id, "chunks_deleted": deleted}
 
@@ -533,7 +422,7 @@ async def query_workspace(slug: str, body: QueryRequest):
         "sources": result.get("sources", {"documents": [], "web": []}),
         "duration_ms": duration_ms,
     }
-    await asyncio.to_thread(_append_log, slug, entry)
+    await asyncio.to_thread(db.append_log, slug, entry)
     return result
 
 
@@ -549,11 +438,11 @@ async def stream_query_workspace(slug: str, body: QueryRequest):
             ws, body.question, prompt_suffix=body.prompt_suffix
         ):
             if chunk.startswith("event: log\n"):
-                # Intercept the log event — write to disk, don't forward to browser
+                # Intercept the log event — write to S3, don't forward to browser
                 try:
                     data_line = chunk.split("data: ", 1)[1].strip()
                     entry = json.loads(data_line)
-                    await asyncio.to_thread(_append_log, slug, entry)
+                    await asyncio.to_thread(db.append_log, slug, entry)
                 except Exception:
                     pass
             else:
@@ -630,11 +519,14 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
             retrieval_query=body.retrieval_query,
         ):
             if chunk.startswith("event: log\n"):
-                # Intercept the log event — write to disk, don't forward to browser
+                # Intercept the log event — write to S3, don't forward to browser
                 try:
                     data_line = chunk.split("data: ", 1)[1].strip()
                     entry = json.loads(data_line)
-                    await asyncio.to_thread(_append_log, slug, entry)
+                    # One log entry per conversation; each message adds a turn
+                    turn = {k: v for k, v in entry.items()
+                            if k not in ("id", "chat_session", "session_id", "streamed")}
+                    await asyncio.to_thread(db.append_chat_turn, slug, session_id, turn)
                 except Exception:
                     pass
             else:
@@ -661,25 +553,47 @@ async def delete_chat_session(slug: str, session_id: str):
 
 # --- Query log endpoints -----------------------------------------------------
 
+def _parse_time(value: Optional[str], name: str):
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    try:
+        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {name} timestamp")
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
 @api_router.get("/workspace/{slug}/logs", summary="Get query log for a workspace")
-def get_logs(slug: str):
-    """Return all log entries for a workspace, newest first."""
-    with _logs_lock:
-        data = _read_log(slug)
-    return list(reversed(data))
+def get_logs(
+    slug: str,
+    limit: int = 20,
+    before: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    """Return one page of log entries, newest first.
+
+    - `before`: the `next` cursor returned by the previous page
+    - `start` / `end`: ISO timestamps; only entries started in [start, end)
+    """
+    return db.list_logs(
+        slug,
+        limit=max(1, min(limit, 100)),
+        before=before,
+        start=_parse_time(start, "start"),
+        end=_parse_time(end, "end"),
+    )
 
 
 @api_router.delete("/workspace/{slug}/logs", status_code=204, summary="Clear query log for a workspace")
 def clear_logs(slug: str):
     """Delete all log entries for a workspace."""
-    with _logs_lock:
-        p = _log_path(slug)
-        if p.exists():
-            p.unlink()
+    db.clear_logs(slug)
     return None
 
 
-# --- Doc tracking (flat-file store, auth-protected) --------------------------
+# --- Doc tracking (per-workspace docs.json in S3, auth-protected) ------------
 
 class DocRecord(BaseModel):
     doc_id: str
@@ -690,38 +604,26 @@ class DocRecord(BaseModel):
 
 @api_router.get("/docs/{slug}", summary="List tracked documents for a workspace")
 def list_docs(slug: str):
-    with _docs_lock:
-        data = _read_docs()
-    return data.get(slug, [])
+    return db.list_docs(slug)
 
 
 @api_router.post("/docs/{slug}", status_code=201, summary="Track a document record")
 def add_doc(slug: str, body: DocRecord):
-    with _docs_lock:
-        data = _read_docs()
-        if slug not in data:
-            data[slug] = []
-        data[slug].append(body.model_dump())
-        _write_docs(data)
+    if db.get_workspace(slug) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    db.add_doc(slug, body.model_dump())
     return {"ok": True}
 
 
 @api_router.delete("/docs/{slug}/{doc_id}", summary="Remove a document record")
 def remove_doc(slug: str, doc_id: str):
-    with _docs_lock:
-        data = _read_docs()
-        if slug in data:
-            data[slug] = [d for d in data[slug] if d.get("doc_id") != doc_id]
-        _write_docs(data)
+    db.remove_doc(slug, doc_id)
     return {"ok": True}
 
 
 @api_router.delete("/docs/{slug}", summary="Remove all doc records for a workspace")
 def remove_workspace_docs(slug: str):
-    with _docs_lock:
-        data = _read_docs()
-        data.pop(slug, None)
-        _write_docs(data)
+    db.clear_docs(slug)
     return {"ok": True}
 
 

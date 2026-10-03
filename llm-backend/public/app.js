@@ -1,5 +1,5 @@
 /* =====================================================
-   RhodyRAG Admin — app.js
+   Infochat Admin — app.js
    All requests go to the same origin (FastAPI on :3001).
    ===================================================== */
 
@@ -72,6 +72,9 @@ const logEntries    = document.getElementById('log-entries');
 const logEmpty      = document.getElementById('log-empty');
 const logCount      = document.getElementById('log-count');
 const clearLogBtn   = document.getElementById('clear-log-btn');
+const logDateFilter = document.getElementById('log-date-filter');
+const logDateClear  = document.getElementById('log-date-clear');
+const logMoreBtn    = document.getElementById('log-more-btn');
 
 // =====================================================
 // HELPERS
@@ -102,7 +105,7 @@ async function apiFetch(path, options = {}) {
 // =====================================================
 
 function loadApiKey() {
-  const stored = sessionStorage.getItem('rhodyrag_api_key');
+  const stored = sessionStorage.getItem('infochat_api_key');
   if (stored) {
     apiKey = stored;
     return true;
@@ -112,12 +115,12 @@ function loadApiKey() {
 
 function saveApiKey(key) {
   apiKey = key;
-  sessionStorage.setItem('rhodyrag_api_key', key);
+  sessionStorage.setItem('infochat_api_key', key);
 }
 
 function clearApiKey() {
   apiKey = '';
-  sessionStorage.removeItem('rhodyrag_api_key');
+  sessionStorage.removeItem('infochat_api_key');
 }
 
 async function validateKey(key) {
@@ -520,50 +523,14 @@ newWorkspaceBtn.addEventListener('click', async () => {
   createWorkspaceMsg.textContent = '';
   createModal.classList.remove('hidden');
 
+  // Pre-fill with current global defaults so the admin sees what will be used.
+  // Prompts stay blank: a blank prompt falls back to the global default.
   resetModelSelects();
   showCreateStep(1);
-
-  // Fetch global settings and built-in defaults in parallel
-  const [settingsRes, defaultsRes] = await Promise.all([
-    apiFetch('/settings'),
-    apiFetch('/defaults'),
-  ]);
-
-  let defaults = null;
-  if (defaultsRes.ok) {
-    defaults = await defaultsRes.json();
-    createWorkspaceForm._promptDefaults = defaults;
-  }
-
-  if (settingsRes.ok) {
-    const settings = await settingsRes.json();
+  const res = await apiFetch('/settings');
+  if (res.ok) {
+    const { system_prompt, rewrite_prompt, api_key_hint, embed_api_key_hint, ...settings } = await res.json();
     fillForm(createWorkspaceForm, settings);
-
-    // Fill blank prompts with built-in defaults
-    if (defaults) {
-      const spEl = createWorkspaceForm.elements['system_prompt'];
-      const webEnabled = createWorkspaceForm.elements['searxng_enabled'].checked;
-      if (spEl && !spEl.value) {
-        spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
-      }
-      const rpEl = createWorkspaceForm.elements['rewrite_prompt'];
-      if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
-    }
-  }
-
-  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
-  if (!createWorkspaceForm._toggleListenerAttached) {
-    createWorkspaceForm._toggleListenerAttached = true;
-    createWorkspaceForm.elements['searxng_enabled'].addEventListener('change', function () {
-      const d = createWorkspaceForm._promptDefaults;
-      if (!d) return;
-      const spEl = createWorkspaceForm.elements['system_prompt'];
-      if (!spEl) return;
-      const cur = spEl.value;
-      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
-        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
-      }
-    });
   }
 });
 
@@ -969,46 +936,73 @@ function renderSources(sources) {
 // QUERY LOG
 // =====================================================
 
-async function loadQueryLog(slug) {
-  const res = await apiFetch(`/workspace/${slug}/logs`);
+// Logs are fetched 20 at a time, newest first. `logNextCursor` is the server's
+// cursor for the next (older) page; the date filter is a local calendar day.
+let logNextCursor = null;
+let logShownCount = 0;
+
+async function loadQueryLog(slug, { append = false } = {}) {
+  const params = new URLSearchParams({ limit: '20' });
+  if (append && logNextCursor) params.set('before', logNextCursor);
+  if (logDateFilter.value) {
+    const [y, m, d] = logDateFilter.value.split('-').map(Number);
+    params.set('start', new Date(y, m - 1, d).toISOString());
+    params.set('end', new Date(y, m - 1, d + 1).toISOString());
+  }
+  const res = await apiFetch(`/workspace/${slug}/logs?${params}`);
   if (!res.ok) return;
-  const entries = await res.json();
-  renderQueryLog(entries);
+  const { entries, next } = await res.json();
+  logNextCursor = next;
+  renderQueryLog(entries, append);
 }
 
-function renderQueryLog(entries) {
-  logEntries.innerHTML = '';
+function renderQueryLog(entries, append = false) {
+  if (!append) {
+    logEntries.innerHTML = '';
+    logShownCount = 0;
+  }
+  logShownCount += entries.length;
+  logMoreBtn.classList.toggle('hidden', !logNextCursor);
+  logDateClear.classList.toggle('hidden', !logDateFilter.value);
 
-  if (!entries.length) {
+  if (!logShownCount) {
+    logEmpty.textContent = logDateFilter.value ? 'No queries logged on this date.' : 'No queries logged yet.';
     logEmpty.classList.remove('hidden');
     logCount.textContent = '';
     return;
   }
 
   logEmpty.classList.add('hidden');
-  logCount.textContent = `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`;
+  logCount.textContent = `Showing ${logShownCount} entr${logShownCount === 1 ? 'y' : 'ies'}`;
 
   entries.forEach(entry => {
     const card = document.createElement('div');
     card.className = 'log-entry';
 
-    // Format timestamp
-    const ts = entry.timestamp ? new Date(entry.timestamp) : null;
-    const tsStr = ts ? ts.toLocaleString() : '—';
+    // A chat conversation is one entry with a list of turns; a single-shot
+    // query is one entry that is itself the only turn.
+    const turns = entry.turns || [entry];
+    const first = turns[0] || {};
+
+    // Format timestamp (latest activity)
+    const lastTs = entry.updated_at || entry.timestamp;
+    const tsStr = lastTs ? new Date(lastTs).toLocaleString() : '—';
     const durStr = entry.duration_ms != null ? `${(entry.duration_ms / 1000).toFixed(1)}s` : '';
+    const turnsStr = entry.turns ? `${turns.length} turn${turns.length === 1 ? '' : 's'}` : '';
 
     // Header (always visible, clickable to expand)
     const header = document.createElement('div');
     header.className = 'log-entry-header';
-    const rewroteNote = (entry.rewritten_query && entry.rewritten_query !== entry.question)
-      ? `<div class="log-entry-rewritten-preview">&rarr; ${escHtml(entry.rewritten_query)}</div>`
+    const rewroteNote = (!entry.turns && first.rewritten_query && first.rewritten_query !== first.question)
+      ? `<div class="log-entry-rewritten-preview">&rarr; ${escHtml(first.rewritten_query)}</div>`
       : '';
     header.innerHTML = `
       <div class="log-entry-left">
-        <div class="log-entry-question">${escHtml(entry.question || '')}</div>
+        <div class="log-entry-question">${escHtml(first.question || '')}</div>
         ${rewroteNote}
       </div>
       <div class="log-entry-meta">
+        ${turnsStr ? `<span class="log-duration-badge">${escHtml(turnsStr)}</span>` : ''}
         <span>${escHtml(tsStr)}</span>
         ${durStr ? `<span class="log-duration-badge">${escHtml(durStr)}</span>` : ''}
       </div>
@@ -1017,44 +1011,15 @@ function renderQueryLog(entries) {
     // Body (hidden by default)
     const body = document.createElement('div');
     body.className = 'log-entry-body hidden';
-
-    // Rewritten query (show whenever present)
-    if (entry.rewritten_query) {
-      const rw = document.createElement('div');
-      rw.innerHTML = `<div class="log-section-label">Rewritten Query</div>
-        <div class="log-rewritten">${escHtml(entry.rewritten_query)}</div>`;
-      body.appendChild(rw);
-    }
-
-    // Answer
-    const answerDiv = document.createElement('div');
-    answerDiv.innerHTML = `<div class="log-section-label">Answer</div>
-      <div class="log-answer">${escHtml(entry.answer || '')}</div>`;
-    body.appendChild(answerDiv);
-
-    // Document sources
-    const docs = (entry.sources && entry.sources.documents) || [];
-    if (docs.length) {
-      const docsDiv = document.createElement('div');
-      const chips = docs.map(d =>
-        `<span class="log-source-chip">${escHtml(d.filename || 'Unknown')}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
-      ).join('');
-      docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
-        <div class="log-source-chips">${chips}</div>`;
-      body.appendChild(docsDiv);
-    }
-
-    // Web sources
-    const web = (entry.sources && entry.sources.web) || [];
-    if (web.length) {
-      const webDiv = document.createElement('div');
-      const links = web.map(r =>
-        `<a class="log-web-link" href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer">${escHtml(r.title || r.url || 'Web result')}</a>`
-      ).join('');
-      webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
-        <div class="log-web-links">${links}</div>`;
-      body.appendChild(webDiv);
-    }
+    turns.forEach((turn, i) => {
+      if (entry.turns) {
+        const q = document.createElement('div');
+        q.innerHTML = `<div class="log-section-label">Turn ${i + 1} &middot; Question</div>
+          <div class="log-answer">${escHtml(turn.question || '')}</div>`;
+        body.appendChild(q);
+      }
+      appendLogTurn(body, turn);
+    });
 
     // Toggle expand/collapse on header click
     header.addEventListener('click', () => {
@@ -1067,13 +1032,68 @@ function renderQueryLog(entries) {
   });
 }
 
+// Rewritten query, answer and sources for one question/answer turn.
+function appendLogTurn(body, turn) {
+  // Rewritten query (show whenever present)
+  if (turn.rewritten_query) {
+    const rw = document.createElement('div');
+    rw.innerHTML = `<div class="log-section-label">Rewritten Query</div>
+      <div class="log-rewritten">${escHtml(turn.rewritten_query)}</div>`;
+    body.appendChild(rw);
+  }
+
+  // Answer
+  const answerDiv = document.createElement('div');
+  answerDiv.innerHTML = `<div class="log-section-label">Answer</div>
+    <div class="log-answer">${escHtml(turn.answer || '')}</div>`;
+  body.appendChild(answerDiv);
+
+  // Document sources
+  const docs = (turn.sources && turn.sources.documents) || [];
+  if (docs.length) {
+    const docsDiv = document.createElement('div');
+    const chips = docs.map(d =>
+      `<span class="log-source-chip">${escHtml(d.filename || 'Unknown')}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
+    ).join('');
+    docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
+      <div class="log-source-chips">${chips}</div>`;
+    body.appendChild(docsDiv);
+  }
+
+  // Web sources
+  const web = (turn.sources && turn.sources.web) || [];
+  if (web.length) {
+    const webDiv = document.createElement('div');
+    const links = web.map(r =>
+      `<a class="log-web-link" href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer">${escHtml(r.title || r.url || 'Web result')}</a>`
+    ).join('');
+    webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
+      <div class="log-web-links">${links}</div>`;
+    body.appendChild(webDiv);
+  }
+}
+
 clearLogBtn.addEventListener('click', async () => {
   if (!currentWorkspaceSlug) return;
   if (!confirm('Clear all log entries for this workspace? This cannot be undone.')) return;
   const res = await apiFetch(`/workspace/${currentWorkspaceSlug}/logs`, { method: 'DELETE' });
   if (res.ok || res.status === 204) {
+    logNextCursor = null;
     renderQueryLog([]);
   }
+});
+
+logDateFilter.addEventListener('change', () => {
+  if (currentWorkspaceSlug) loadQueryLog(currentWorkspaceSlug);
+});
+
+logDateClear.addEventListener('click', () => {
+  logDateFilter.value = '';
+  if (currentWorkspaceSlug) loadQueryLog(currentWorkspaceSlug);
+});
+
+logMoreBtn.addEventListener('click', () => {
+  if (currentWorkspaceSlug) loadQueryLog(currentWorkspaceSlug, { append: true });
 });
 
 // =====================================================
@@ -1152,6 +1172,13 @@ globalSettingsForm.addEventListener('submit', async (e) => {
 
 function fillForm(form, obj) {
   Object.entries(obj).forEach(([key, val]) => {
+    // API keys come back blank with a "<field>_hint" (e.g. "…a1b2"); a blank
+    // field isn't sent on save, so the stored key is kept.
+    if (key.endsWith('_hint')) {
+      const target = form.elements[key.slice(0, -'_hint'.length)];
+      if (target) target.placeholder = val ? `Saved key ${val} (leave blank to keep)` : '';
+      return;
+    }
     const el = form.elements[key];
     if (!el) return;
     if (el.type === 'checkbox') {

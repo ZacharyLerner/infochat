@@ -1,6 +1,6 @@
-# RhodyRAG — FastAPI backend
-# Build:   docker build -t rhodyrag .
-# Run:     docker run -p 3001:3001 --env-file .env rhodyrag
+# Infochat — FastAPI backend
+# Build:   docker build -t infochat .
+# Run:     docker run -p 3001:3001 --env-file .env infochat
 # Compose: docker compose up -d  (see docker-compose.yml)
 
 FROM python:3.12-slim

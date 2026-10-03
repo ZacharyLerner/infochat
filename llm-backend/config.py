@@ -16,11 +16,12 @@ API_BASE = os.getenv("OPENAI_API_BASE", "https://llmgw.its.uri.edu/v1")
 # AWS S3 Vectors: pre-created vector bucket holding one index per workspace.
 # Credentials come from the standard boto3 chain (AWS_PROFILE, AWS_ACCESS_KEY_ID/
 # AWS_SECRET_ACCESS_KEY, instance role, ...).
-S3_VECTOR_BUCKET = os.getenv("S3_VECTOR_BUCKET", "infochat-testing")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
+S3_VECTOR_BUCKET = os.getenv("S3_VECTOR_BUCKET", "infochat-vectors")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# SQLite database path
-DB_PATH = os.getenv("DB_PATH", "./settings.db")
+# S3 bucket (regular, not vector) holding global settings, workspace settings
+# and document records as JSON — see db.py.
+S3_STATE_BUCKET = os.getenv("S3_STATE_BUCKET", "zl-workspace-storage-727646498592-us-east-1-an")
 
 # Admin API key (read from ADMIN_API_KEY in .env)
 APP_API_KEY = os.getenv("ADMIN_API_KEY", "")

@@ -11,11 +11,8 @@ services:
   backend:
     volumes:
       - .:/app
-      # Keep the data mounts from docker-compose.yml pointing at the same files
       # Use the host's AWS CLI profiles (set AWS_PROFILE in your shell)
       - ${HOME}/.aws:/root/.aws:ro
-      - ./settings.db:/app/settings.db
-      - ./docs.json:/app/docs.json
     environment:
       - AWS_PROFILE
     command: >

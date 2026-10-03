@@ -4,15 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <base href="/" />
-  <title>RhodyRAG Admin</title>
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <title>Infochat Admin</title>
+  <link rel="stylesheet" href="styles.css?v=6" />
 </head>
 <body>
 
   <!-- LOGIN SCREEN -->
   <div id="login-screen" class="screen">
     <div class="login-box">
-      <h1>RhodyRAG</h1>
+      <h1>Infochat</h1>
       <p class="subtitle">Admin Interface</p>
       <form id="login-form">
         <label for="api-key-input">API Key</label>
@@ -35,7 +35,7 @@
     <!-- SIDEBAR -->
     <aside id="sidebar">
       <div class="sidebar-header">
-        <span class="sidebar-title">RhodyRAG</span>
+        <span class="sidebar-title">Infochat</span>
         <button id="logout-btn" class="link-btn" title="Log out">Logout</button>
       </div>
       <nav>
@@ -230,11 +230,16 @@
         <!-- Tab: Log -->
         <div id="ws-log" class="tab-panel hidden">
           <div class="log-toolbar">
-            <span id="log-count" class="muted"></span>
+            <div class="log-filter">
+              <input type="date" id="log-date-filter" aria-label="Show logs from date" />
+              <button id="log-date-clear" class="link-btn hidden">Show all</button>
+              <span id="log-count" class="muted"></span>
+            </div>
             <button id="clear-log-btn" class="btn-secondary">Clear Log</button>
           </div>
           <p id="log-empty" class="muted hidden">No queries logged yet.</p>
           <div id="log-entries"></div>
+          <button id="log-more-btn" class="btn-secondary hidden">Load older</button>
         </div>
       </section>
 
@@ -246,9 +251,22 @@
             <button id="close-modal-btn" class="link-btn">&times;</button>
           </div>
           <form id="create-workspace-form" class="settings-form">
-            <div class="form-row">
-              <label>Name <span class="required">*</span></label>
-              <input type="text" name="name" required />
+            <div class="wizard-progress" id="create-step-label">Step 1 of 3 &mdash; Workspace &amp; Keys</div>
+
+            <!-- Step 1: name + keys -->
+            <div class="wizard-step" data-step="1">
+              <div class="form-row">
+                <label>Name <span class="required">*</span></label>
+                <input type="text" name="name" required />
+              </div>
+              <div class="form-row">
+                <label>API Key <span class="required">*</span></label>
+                <input type="password" name="api_key" />
+              </div>
+              <div class="form-row">
+                <label>Embed API Key</label>
+                <input type="password" name="embed_api_key" />
+              </div>
             </div>
 
             <!-- Step 2: models + retrieval settings -->
@@ -287,7 +305,7 @@
               </div>
               <div class="form-row full-width">
                 <label>System Prompt</label>
-                <textarea name="system_prompt" rows="4"></textarea>
+                <textarea name="system_prompt" rows="4" placeholder="Leave blank to use global default"></textarea>
               </div>
             </div>
 
@@ -316,13 +334,15 @@
                 <select name="rewrite_model"><option value="">Disabled</option></select>
               </div>
               <div class="form-row full-width">
-                <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
-                <textarea name="rewrite_prompt" rows="4"></textarea>
+                <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
+                <textarea name="rewrite_prompt" rows="4" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
               </div>
             </div>
 
             <div class="form-actions">
-              <button type="submit" class="btn-primary">Create Workspace</button>
+              <button type="button" id="create-back-btn" class="btn-secondary hidden">Back</button>
+              <button type="button" id="create-next-btn" class="btn-primary">Next</button>
+              <button type="submit" id="create-submit-btn" class="btn-primary hidden">Create Workspace</button>
               <span id="create-workspace-msg" class="status-msg"></span>
             </div>
           </form>
@@ -417,6 +437,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

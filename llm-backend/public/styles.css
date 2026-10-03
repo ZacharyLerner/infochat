@@ -1,5 +1,5 @@
 /* =====================================================
-   RhodyRAG Admin — styles.css
+   Infochat Admin — styles.css
    Minimal, monochrome, functional
    ===================================================== */
 
@@ -882,6 +882,16 @@ td code {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
+}
+
+.log-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#log-more-btn {
+  margin-top: 8px;
 }
 
 .log-entry {

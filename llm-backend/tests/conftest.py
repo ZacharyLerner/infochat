@@ -1,21 +1,22 @@
 """
 conftest.py
 ===========
-Shared pytest fixtures for the RhodyRAG test suite.
+Shared pytest fixtures for the Infochat test suite.
 
 Every test module that needs a database, the FastAPI app, or a temporary
 workspace can import these fixtures directly via pytest's dependency injection.
 
 Strategy
 --------
-- All tests use an **in-memory / temp-file SQLite database** so they never
-  touch the production `settings.db`.
+- All tests use an **in-memory fake S3 bucket** for settings and document
+  records, so they never touch real AWS state.
 - The FastAPI `TestClient` is constructed with `ADMIN_API_KEY` patched to a
   known value so auth tests are deterministic.
 - LLM, embedding, and S3 Vectors calls are **mocked** at the module level so
   tests run offline without any network access or installed model weights.
 """
 
+import io
 import os
 import tempfile
 import threading
@@ -31,47 +32,90 @@ AUTH_HEADERS = {"X-API-Key": TEST_API_KEY}
 
 
 # ---------------------------------------------------------------------------
+# In-memory stand-in for the S3 client used by db.py
+# ---------------------------------------------------------------------------
+
+class FakeS3:
+    """Implements the subset of the boto3 S3 client that db.py uses,
+    including If-Match / If-None-Match conditional writes."""
+
+    def __init__(self):
+        self.objects = {}   # key -> (bytes, etag)
+        self._version = 0
+
+    @staticmethod
+    def _error(code):
+        from botocore.exceptions import ClientError
+        return ClientError({"Error": {"Code": code, "Message": code}}, "op")
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise self._error("NoSuchKey")
+        body, etag = self.objects[Key]
+        return {"Body": io.BytesIO(body), "ETag": etag}
+
+    def put_object(self, Bucket, Key, Body, ContentType=None, IfMatch=None, IfNoneMatch=None):
+        current = self.objects.get(Key)
+        if IfNoneMatch == "*" and current is not None:
+            raise self._error("PreconditionFailed")
+        if IfMatch is not None and (current is None or current[1] != IfMatch):
+            raise self._error("PreconditionFailed")
+        self._version += 1
+        self.objects[Key] = (Body, f'"etag-{self._version}"')
+        return {"ETag": self.objects[Key][1]}
+
+    def delete_object(self, Bucket, Key):
+        self.objects.pop(Key, None)
+        return {}
+
+    def delete_objects(self, Bucket, Delete):
+        for o in Delete["Objects"]:
+            self.objects.pop(o["Key"], None)
+        return {}
+
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        fake = self
+
+        class _Paginator:
+            def paginate(self, Bucket, Prefix="", Delimiter=None):
+                if Delimiter is None:
+                    keys = sorted(k for k in fake.objects if k.startswith(Prefix))
+                    yield {"Contents": [{"Key": k} for k in keys]}
+                    return
+                prefixes = sorted({
+                    Prefix + k[len(Prefix):].split(Delimiter, 1)[0] + Delimiter
+                    for k in fake.objects
+                    if k.startswith(Prefix) and Delimiter in k[len(Prefix):]
+                })
+                yield {"CommonPrefixes": [{"Prefix": p} for p in prefixes]}
+
+        return _Paginator()
+
+
+# ---------------------------------------------------------------------------
 # Isolated config / DB fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def isolate_config(tmp_path, monkeypatch):
     """
-    Point config.APP_API_KEY, config.DB_PATH, and
-    main.LOGS_DIR at temporary locations so tests never affect production data.
+    Point config.APP_API_KEY and the db.py S3 client at test-only stand-ins
+    so tests never affect production data.
 
     `autouse=True` means this fixture is applied to *every* test automatically.
     """
-    db_file = str(tmp_path / "test_settings.db")
-    logs_dir = tmp_path / "logs"
-    os.makedirs(str(logs_dir), exist_ok=True)
 
     monkeypatch.setenv("ADMIN_API_KEY", TEST_API_KEY)
 
     import config
     monkeypatch.setattr(config, "APP_API_KEY", TEST_API_KEY)
-    monkeypatch.setattr(config, "DB_PATH", db_file)
 
-    # Re-initialise the database against the temp file
+    # Settings and document records go to an in-memory fake bucket
     import db
-    import sqlite3
+    fake_s3 = FakeS3()
+    monkeypatch.setattr(db, "_s3", lambda: fake_s3)
 
-    def _test_connect():
-        conn = sqlite3.connect(db_file)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
-
-    monkeypatch.setattr(db, "_connect", _test_connect)
-    db.init_db()
-
-    # Redirect the log directory used by main.py to the temp path.
-    # main.py uses a module-level Path("logs") constant; patch it after import.
-    import main
-    from pathlib import Path
-    monkeypatch.setattr(main, "LOGS_DIR", logs_dir)
-    # Also redirect the docs.json flat file
-    monkeypatch.setattr(main, "DOCS_FILE", tmp_path / "docs.json")
 
     yield
 
@@ -108,7 +152,7 @@ def workspace(test_client):
     Useful as a dependency for tests that need an existing workspace.
     """
     resp = test_client.post(
-        "/workspace",
+        "/api/workspace",
         json={"name": "Test Workspace", "llm_model": "openai/gpt-4o-mini"},
         headers=AUTH_HEADERS,
     )
