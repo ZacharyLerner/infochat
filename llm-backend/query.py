@@ -1,12 +1,9 @@
 """
 query.py
 ========
-Workspace-scoped querying: reconnect to the workspace's table, build the LLM
-from that workspace's settings, retrieve top_n chunks above the similarity
-threshold, and answer.
-
-The embed model is read from the workspace row, falling back to the global
-settings row if the workspace has no embed_model set.
+Workspace-scoped querying: build the LLM from that workspace's settings,
+retrieve top_n chunks above the similarity threshold from the workspace's
+S3 Vectors index, and answer.
 
 Chat sessions maintain a ChatMemoryBuffer per session_id (UUID) for rolling
 conversation context. Each message retrieves fresh context nodes then streams
@@ -34,28 +31,23 @@ def _safe_embed_query(text: str) -> str:
     """Truncate text to _MAX_EMBED_CHARS to avoid embedding model context overflow."""
     return text[:_MAX_EMBED_CHARS] if len(text) > _MAX_EMBED_CHARS else text
 
-from llama_index.core import VectorStoreIndex
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.llms.litellm import LiteLLM
-from llama_index.vector_stores.lancedb.base import TableNotFoundError
 
 import config
-import db
-from embedding import build_embed_model, get_vector_store
+import embedding
 import searxng as _searxng
 import rewriter as _rewriter
 
 # ---------------------------------------------------------------------------
 # In-process chat session registry
-# Maps session_id (str UUID) → {"index": VectorStoreIndex, "memory": ChatMemoryBuffer, "workspace": dict}
+# Maps session_id (str UUID) → {"memory": ChatMemoryBuffer, "workspace": dict}
 # Lost on server restart; re-seeded from browser history on first message.
 #
 # _chat_sessions_lock serializes session creation so that two concurrent
 # first-messages to the same session don't each build (and then overwrite)
-# their own index state. Individual message turns within an established session
-# are serialized by the same lock — per-session locks would be cleaner but the
-# session count is small and index builds are the bottleneck, not the dict ops.
+# their own state.
 # ---------------------------------------------------------------------------
 import threading as _threading
 _chat_sessions: dict = {}
@@ -96,38 +88,16 @@ def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: s
     )
 
 
-def _build_index(workspace: dict) -> VectorStoreIndex:
-    """Shared index construction for both query modes."""
-    embed_model = workspace["embed_model"] or db.get_settings()["embed_model"]
-    return VectorStoreIndex.from_vector_store(
-        get_vector_store(workspace["slug"]),
-        embed_model=build_embed_model(
-            embed_model,
-            api_key=workspace["api_key"],
-            embed_api_key=workspace["embed_api_key"],
-        ),
-    )
-
-
-def _build_session_state(workspace: dict, chat_history: list[dict] | None = None) -> dict | None:
+def _build_session_state(workspace: dict, chat_history: list[dict] | None = None) -> dict:
     """Build and return the session state dict for a chat session.
 
-    Returns a dict with keys: index, memory, workspace
-    Returns None if no documents have been embedded yet AND web search is disabled.
+    Returns a dict with keys: memory, workspace
 
     `chat_history` is a list of {"role": "user"|"assistant", "content": str}
     dicts from the browser's localStorage. The last 6 entries are pre-loaded
     into ChatMemoryBuffer so the LLM has context after a server restart.
     """
     from llama_index.core.base.llms.types import ChatMessage, MessageRole as MR
-
-    index = None
-    try:
-        index = _build_index(workspace)
-    except TableNotFoundError:
-        # No documents embedded — allowed when web search is enabled
-        if not workspace.get("searxng_enabled"):
-            return None
 
     memory = ChatMemoryBuffer.from_defaults(token_limit=4096)
 
@@ -139,7 +109,7 @@ def _build_session_state(workspace: dict, chat_history: list[dict] | None = None
             if content:
                 memory.put(ChatMessage(role=role, content=content))
 
-    return {"index": index, "memory": memory, "workspace": workspace}
+    return {"memory": memory, "workspace": workspace}
 
 
 # ---------------------------------------------------------------------------
@@ -203,17 +173,10 @@ async def _rewrite_if_enabled(
     return rewritten, rewritten
 
 
-async def _retrieve_nodes(index: VectorStoreIndex | None, query: str, workspace: dict) -> list:
-    """Retrieve relevant nodes from the vector index.
-
-    Returns an empty list when index is None (no documents embedded).
-    """
-    if index is None:
-        return []
-
+async def _retrieve_nodes(query: str, workspace: dict) -> list:
+    """Retrieve relevant nodes from the workspace's S3 Vectors index."""
     threshold = workspace["similarity_threshold"]
-    retriever = index.as_retriever(similarity_top_k=workspace["top_n"])
-    nodes = await asyncio.to_thread(retriever.retrieve, _safe_embed_query(query))
+    nodes = await embedding.retrieve(workspace, _safe_embed_query(query), workspace["top_n"])
     return [n for n in nodes if n.score is None or n.score >= threshold]
 
 
@@ -250,7 +213,7 @@ async def stream_chat_session(
             a focused retrieval string; rewriting still applies on top of it.
 
     Flow per message:
-      1. Get or build the session state (index + memory).
+      1. Get or build the session state (memory).
       2. Optionally rewrite the retrieval query.
       3. Concurrently: retrieve relevant nodes + run web search (if enabled).
       4. Build a messages list: prior history from memory + system prompt +
@@ -265,18 +228,12 @@ async def stream_chat_session(
         # ── 1. Get or build session state ────────────────────────────────────
         if session_id not in _chat_sessions:
             state = await asyncio.to_thread(_build_session_state, workspace, history or [])
-            if state is None:
-                yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
-                yield "event: sources\ndata: {\"documents\": [], \"web\": []}\n\n"
-                yield "event: done\ndata: [DONE]\n\n"
-                return
             with _chat_sessions_lock:
                 if session_id not in _chat_sessions:
                     _chat_sessions[session_id] = state
 
         with _chat_sessions_lock:
             state = _chat_sessions[session_id]
-        index  = state["index"]
         memory = state["memory"]
 
         # ── 2. Determine base retrieval query (caller override or message) ───
@@ -306,7 +263,7 @@ async def stream_chat_session(
             return await _searxng.web_search(effective_query)
 
         nodes, web_results = await asyncio.gather(
-            _retrieve_nodes(index, effective_query, workspace),
+            _retrieve_nodes(effective_query, workspace),
             _web_task(),
         )
 
@@ -410,33 +367,20 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
     # Step 1: Rewrite if enabled
     effective_query, rewritten = await _rewrite_if_enabled(question, workspace)
 
-    # Step 2: Build index (may raise TableNotFoundError)
     web_enabled = bool(workspace.get("searxng_enabled"))
 
-    index = None
-    try:
-        index = await asyncio.to_thread(_build_index, workspace)
-    except TableNotFoundError:
-        if not web_enabled:
-            return {
-                "answer": "No documents have been embedded in this workspace yet.",
-                "sources": {"documents": [], "web": []},
-                "rewritten_query": rewritten,
-            }
-        # Web search is enabled — proceed without vector results
-
-    # Step 3: Concurrent retrieval + web search
+    # Step 2: Concurrent retrieval + web search
     async def _web_task():
         if not web_enabled:
             return []
         return await _searxng.web_search(effective_query)
 
     nodes, web_results = await asyncio.gather(
-        _retrieve_nodes(index, effective_query, workspace),
+        _retrieve_nodes(effective_query, workspace),
         _web_task(),
     )
 
-    # Step 4: Build context
+    # Step 3: Build context
     context_str = _build_merged_context(nodes, web_results)
 
     if not context_str:
@@ -447,7 +391,7 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
             "rewritten_query": rewritten,
         }
 
-    # Step 5: Build prompt and call LLM (blocking — fine inside asyncio.run)
+    # Step 4: Build prompt and call LLM (blocking — fine inside asyncio.run)
     from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
     system_prompt = workspace.get("system_prompt") or ""
@@ -515,32 +459,20 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             safe_rw = rewritten.replace('\n', '\\n')
             yield f"event: rewritten_query\ndata: {safe_rw}\n\n"
 
-        # ── 2. Build index + concurrent web search ────────────────────────────
         web_enabled = bool(workspace.get("searxng_enabled"))
 
-        index = None
-        try:
-            index = await asyncio.to_thread(_build_index, workspace)
-        except TableNotFoundError:
-            if not web_enabled:
-                yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
-                yield "event: sources\ndata: {\"documents\": [], \"web\": []}\n\n"
-                yield "event: done\ndata: [DONE]\n\n"
-                return
-            # Web enabled — continue without vector results
-
-        # ── 3. Concurrent: vector retrieval + web search ──────────────────────
+        # ── 2. Concurrent: vector retrieval + web search ──────────────────────
         async def _web_task():
             if not web_enabled:
                 return []
             return await _searxng.web_search(effective_query)
 
         nodes, web_results = await asyncio.gather(
-            _retrieve_nodes(index, effective_query, workspace),
+            _retrieve_nodes(effective_query, workspace),
             _web_task(),
         )
 
-        # ── 4. Build merged context ───────────────────────────────────────────
+        # ── 3. Build merged context ───────────────────────────────────────────
         context_str = _build_merged_context(nodes, web_results)
 
         if not context_str:
@@ -554,7 +486,7 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             yield "event: done\ndata: [DONE]\n\n"
             return
 
-        # ── 5. Build the prompt ───────────────────────────────────────────────
+        # ── 4. Build the prompt ───────────────────────────────────────────────
         system_prompt = workspace["system_prompt"] or ""
         user_prompt = (
             f"Context information is below.\n"
@@ -573,7 +505,7 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
         messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
 
-        # ── 6. Stream directly from the LLM ──────────────────────────────────
+        # ── 5. Stream directly from the LLM ──────────────────────────────────
         llm = build_llm(
             workspace["llm_model"],
             workspace["api_key"],
@@ -593,7 +525,7 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             yield "event: done\ndata: [DONE]\n\n"
             return
 
-        # ── 7. Emit sources ───────────────────────────────────────────────────
+        # ── 6. Emit sources ───────────────────────────────────────────────────
         doc_sources = [
             {
                 "score": node.score,

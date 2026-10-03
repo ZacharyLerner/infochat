@@ -23,9 +23,11 @@ services:
       # Override SEARXNG_URL to use the internal Docker service name so the
       # backend reaches SearXNG over the compose network (not the host port).
       - SEARXNG_URL=http://searxng:8080
+    # Vectors live in AWS S3 Vectors (S3_VECTOR_BUCKET in .env). AWS credentials
+    # come from .env (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION)
+    # or an instance role.
     volumes:
-      # Persist the vector store, SQLite DB, and document tracking file
-      - ./lancedb:/app/lancedb
+      # Persist the SQLite DB and document tracking file
       - ./settings.db:/app/settings.db
       - ./docs.json:/app/docs.json
     depends_on:

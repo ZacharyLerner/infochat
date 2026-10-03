@@ -5,7 +5,7 @@
 
 FROM python:3.12-slim
 
-# Install system deps needed by some Python packages (e.g. lancedb, pypdf)
+# Install system deps needed by some Python packages (e.g. pypdf)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libgomp1 \
@@ -19,9 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source
 COPY . .
-
-# Create persistent data directories so volume mounts initialise cleanly
-RUN mkdir -p lancedb
 
 EXPOSE 3001
 

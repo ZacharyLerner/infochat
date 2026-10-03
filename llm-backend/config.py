@@ -13,8 +13,11 @@ load_dotenv()
 # LLM gateway base URL (OpenAI-compatible)
 API_BASE = os.getenv("OPENAI_API_BASE", "https://llmgw.its.uri.edu/v1")
 
-# LanceDB storage directory
-LANCEDB_DIR = os.getenv("LANCEDB_DIR", "./lancedb")
+# AWS S3 Vectors: pre-created vector bucket holding one index per workspace.
+# Credentials come from the standard boto3 chain (AWS_PROFILE, AWS_ACCESS_KEY_ID/
+# AWS_SECRET_ACCESS_KEY, instance role, ...).
+S3_VECTOR_BUCKET = os.getenv("S3_VECTOR_BUCKET", "infochat-testing")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
 
 # SQLite database path
 DB_PATH = os.getenv("DB_PATH", "./settings.db")

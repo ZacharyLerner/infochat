@@ -12,9 +12,12 @@ services:
     volumes:
       - .:/app
       # Keep the data mounts from docker-compose.yml pointing at the same files
-      - ./lancedb:/app/lancedb
+      # Use the host's AWS CLI profiles (set AWS_PROFILE in your shell)
+      - ${HOME}/.aws:/root/.aws:ro
       - ./settings.db:/app/settings.db
       - ./docs.json:/app/docs.json
+    environment:
+      - AWS_PROFILE
     command: >
       python -m uvicorn main:app --host 0.0.0.0 --port 3001
       --reload --reload-dir /app --reload-exclude venv

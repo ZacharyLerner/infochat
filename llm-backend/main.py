@@ -82,12 +82,25 @@ def _write_docs(data: Dict[str, Any]):
 
 
 # --- Lifespan ----------------------------------------------------------------
+def _ensure_indexes() -> None:
+    """Create S3 Vectors indexes for any workspace that doesn't have one yet
+    (e.g. workspaces created before vectors moved to S3)."""
+    for ws in db.list_workspaces():
+        try:
+            embedding.ensure_workspace_index(ws)
+        except Exception as exc:
+            _logging.getLogger(__name__).warning(
+                "could not ensure S3 index for workspace '%s': %s", ws["slug"], exc
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
     await asyncio.to_thread(db.init_db)
     if not await asyncio.to_thread(DOCS_FILE.exists):
         await asyncio.to_thread(_write_docs, {})
+    await asyncio.to_thread(_ensure_indexes)
     yield
 
 
@@ -253,6 +266,12 @@ def create_workspace(body: CreateWorkspace):
         rewrite_model=body.rewrite_model or "",
         rewrite_prompt=body.rewrite_prompt or "",
     )
+    # Every workspace needs its S3 Vectors index; roll back if it can't be made.
+    try:
+        embedding.create_workspace_index(ws)
+    except Exception as exc:
+        db.delete_workspace(ws["slug"])
+        raise HTTPException(status_code=502, detail=f"Could not create vector index: {exc}")
     manager.on_workspace_created(slug=ws["slug"], name=ws["name"])
     return ws
 
@@ -279,21 +298,6 @@ def update_workspace(slug: str, body: UpdateWorkspace):
     return ws
 
 
-def _drop_lancedb_table(slug: str) -> None:
-    """Sync helper: drop the LanceDB table for a workspace if it exists.
-
-    Acquires the per-workspace lock so a concurrent in-flight embed cannot
-    write to the table while it is being dropped.
-    """
-    import lancedb as _lancedb
-    ws_lock = embedding._get_workspace_lock(slug)
-    with ws_lock:
-        ldb = _lancedb.connect(config.LANCEDB_DIR)
-        tname = embedding.table_name(slug)
-        if tname in ldb.table_names():
-            ldb.drop_table(tname)
-
-
 @app.delete("/workspace/{slug}", summary="Delete a workspace")
 async def delete_workspace(slug: str):
     import asyncio
@@ -301,8 +305,11 @@ async def delete_workspace(slug: str):
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    # Drop the LanceDB table (blocking disk I/O — offload to thread)
-    await asyncio.to_thread(_drop_lancedb_table, slug)
+    # Delete the S3 Vectors index first so a failure leaves the workspace intact
+    try:
+        await asyncio.to_thread(embedding.delete_workspace_index, slug)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not delete vector index: {exc}")
 
     # Remove doc tracking records (blocking file I/O — offload to thread)
     def _remove_docs():
@@ -379,17 +386,19 @@ async def delete_embed(slug: str, doc_id: str):
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    deleted = await asyncio.to_thread(embedding.delete_workspace_file, slug, doc_id)
+    # S3 Vectors deletes by key, and keys are derived from the chunk count
+    # recorded in docs.json at embed time.
+    def _find_record():
+        with _docs_lock:
+            data = _read_docs()
+        return next((d for d in data.get(slug, []) if d.get("doc_id") == doc_id), None)
+    record = await asyncio.to_thread(_find_record)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    if deleted == 0:
-        # Check if the doc was tracked in docs.json even if no vectors were found
-        def _check_tracked():
-            with _docs_lock:
-                return _read_docs()
-        data = await asyncio.to_thread(_check_tracked)
-        tracked = any(d.get("doc_id") == doc_id for d in data.get(slug, []))
-        if not tracked:
-            raise HTTPException(status_code=404, detail="Document not found")
+    deleted = await asyncio.to_thread(
+        embedding.delete_workspace_file, slug, doc_id, record.get("chunks_embedded") or 0
+    )
 
     # Keep docs.json in sync (blocking file I/O — offload to thread)
     await asyncio.to_thread(_remove_doc_from_json, slug, doc_id)
