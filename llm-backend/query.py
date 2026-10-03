@@ -17,7 +17,10 @@ retrieval when enabled. Results are merged into a single labeled context block.
 """
 
 import asyncio
+import datetime as _dt
 import json
+import time as _time
+import uuid as _uuid
 from typing import AsyncGenerator
 
 # Embedding models like qwen3-embed-8b have a 2048-token context window.
@@ -25,6 +28,8 @@ from typing import AsyncGenerator
 # under 2048 tokens for any realistic text (avg ~4 chars/token → ~7000 chars
 # for 1750 tokens, leaving headroom).
 _MAX_EMBED_CHARS = 6000
+
+from prompts import DEFAULT_SYSTEM_PROMPT_RAG, DEFAULT_SYSTEM_PROMPT_WEB  # noqa: E402
 
 
 def _safe_embed_query(text: str) -> str:
@@ -55,8 +60,9 @@ _chat_sessions_lock = _threading.Lock()
 
 
 # Gateway model strings are not in LiteLLM's registry, so it falls back to a
-# 2048-token context window, and LlamaIndex can calculate negative available
-# context and raise ValueError before the query reaches the LLM. We subclass to override the metadata property with a fixed
+# 2048-token context window. With max_tokens near that ceiling, LlamaIndex
+# calculates negative available context and raises ValueError before the query
+# reaches the LLM. We subclass to override the metadata property with a fixed
 # large window; LlamaIndex only uses this for prompt budgeting — the gateway
 # enforces the real model limit.
 _CONTEXT_WINDOW = 128_000
@@ -78,13 +84,14 @@ class _GatewayLiteLLM(LiteLLM):
         )
 
 
-def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "") -> LiteLLM:
+def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "", max_tokens: int = 1024) -> LiteLLM:
     return _GatewayLiteLLM(
         model=llm_model,
         api_base=config.API_BASE,
         api_key=api_key,
         temperature=temperature,
         system_prompt=system_prompt or None,
+        max_tokens=max_tokens,
     )
 
 
@@ -132,13 +139,22 @@ def _build_merged_context(nodes: list, web_results: list[dict]) -> str:
         parts.append(f"--- Document Context ---\n{doc_text}")
 
     if web_results:
-        lines = ["--- Web Search Results ---"]
+        lines = [
+            "--- Web Search Results ---",
+            "The following live web results were retrieved for this query.",
+            "When they are relevant, you MUST cite the source URL in your answer.",
+        ]
         for i, r in enumerate(web_results, 1):
             title   = r.get("title", "")
             url     = r.get("url", "")
             snippet = r.get("snippet", "")
-            lines.append(f"[{i}] Title: {title}\n    URL: {url}\n    {snippet}")
-        parts.append("\n".join(lines))
+            lines.append(
+                f"[Web Result {i}]\n"
+                f"  Title:   {title}\n"
+                f"  Source:  {url}\n"
+                f"  Excerpt: {snippet}"
+            )
+        parts.append("\n\n".join(lines))
 
     return "\n\n".join(parts)
 
@@ -167,10 +183,9 @@ async def _rewrite_if_enabled(
         history=history,
     )
 
-    if rewritten == query:
-        return query, None
-
-    return rewritten, rewritten
+    # Only treat as rewritten if the query actually changed
+    changed = rewritten != query
+    return rewritten, rewritten if changed else None
 
 
 async def _retrieve_nodes(query: str, workspace: dict) -> list:
@@ -237,7 +252,9 @@ async def stream_chat_session(
         memory = state["memory"]
 
         # ── 2. Determine base retrieval query (caller override or message) ───
-        base_query = retrieval_query if retrieval_query else message
+        # Strip any frontend-injected system instructions appended after \n\n[
+        clean_message = message.split("\n\n[")[0].strip()
+        base_query = retrieval_query if retrieval_query else clean_message
 
         # For rewrite context: extract the last 2 prior turns from memory
         prior_turns = [
@@ -260,7 +277,10 @@ async def stream_chat_session(
         async def _web_task():
             if not web_enabled:
                 return []
-            return await _searxng.web_search(effective_query)
+            num = max(1, min(int(workspace.get("searxng_num_results") or 3), 10))
+            suffix = (workspace.get("searxng_query_suffix") or "").strip()
+            web_query = f"{effective_query} {suffix}".strip() if suffix else effective_query
+            return await _searxng.web_search(web_query, num_results=num)
 
         nodes, web_results = await asyncio.gather(
             _retrieve_nodes(effective_query, workspace),
@@ -278,18 +298,25 @@ async def stream_chat_session(
         ]
 
         # ── 6. Build the context block and prompt ─────────────────────────────
-        system_prompt  = workspace.get("system_prompt") or ""
+        system_prompt = (
+            workspace.get("system_prompt")
+            or (DEFAULT_SYSTEM_PROMPT_WEB if web_enabled else DEFAULT_SYSTEM_PROMPT_RAG)
+        )
         prior_messages = memory.get()
 
         context_str = _build_merged_context(nodes, web_results)
 
         if context_str:
+            web_note = (
+                " When citing web results, include the source URL."
+                if web_enabled and web_results else ""
+            )
             user_content = (
                 f"Context information is below.\n"
                 f"---------------------\n"
                 f"{context_str}\n"
                 f"---------------------\n"
-                f"Given the context information and the conversation history, answer the query.\n"
+                f"Given the context information above and the conversation history, answer the query.{web_note}\n"
                 f"Query: {message}\n"
                 f"Answer: "
             )
@@ -316,7 +343,8 @@ async def stream_chat_session(
             workspace["llm_model"],
             workspace["api_key"],
             workspace["temperature"],
-            workspace["system_prompt"],
+            system_prompt,
+            workspace.get("max_tokens", 1024),
         )
 
         full_response = ""
@@ -343,6 +371,20 @@ async def stream_chat_session(
         sources_payload = {"documents": doc_sources, "web": web_results}
         yield f"event: sources\ndata: {json.dumps(sources_payload)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
+
+        # ── 9. Emit log event (intercepted by main.py, never reaches browser) ─
+        log_entry = {
+            "id": str(_uuid.uuid4()),
+            "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            "streamed": True,
+            "chat_session": True,
+            "session_id": session_id,
+            "question": clean_message,
+            "rewritten_query": rewritten,
+            "answer": full_response.strip(),
+            "sources": sources_payload,
+        }
+        yield f"event: log\ndata: {json.dumps(log_entry)}\n\n"
 
     except Exception as exc:
         error_msg = str(exc).replace('\n', ' ')
@@ -373,7 +415,10 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
     async def _web_task():
         if not web_enabled:
             return []
-        return await _searxng.web_search(effective_query)
+        num = max(1, min(int(workspace.get("searxng_num_results") or 3), 10))
+        suffix = (workspace.get("searxng_query_suffix") or "").strip()
+        web_query = f"{effective_query} {suffix}".strip() if suffix else effective_query
+        return await _searxng.web_search(web_query, num_results=num)
 
     nodes, web_results = await asyncio.gather(
         _retrieve_nodes(effective_query, workspace),
@@ -394,13 +439,20 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
     # Step 4: Build prompt and call LLM (blocking — fine inside asyncio.run)
     from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
-    system_prompt = workspace.get("system_prompt") or ""
+    system_prompt = (
+        workspace.get("system_prompt")
+        or (DEFAULT_SYSTEM_PROMPT_WEB if web_enabled else DEFAULT_SYSTEM_PROMPT_RAG)
+    )
+    web_note = (
+        " When citing web results, include the source URL."
+        if web_enabled and web_results else ""
+    )
     user_prompt = (
         f"Context information is below.\n"
         f"---------------------\n"
         f"{context_str}\n"
         f"---------------------\n"
-        f"Given the context information and not prior knowledge, answer the query.\n"
+        f"Given the context information above and not prior knowledge, answer the query.{web_note}\n"
         f"Query: {question}\n"
         f"Answer: "
     )
@@ -414,7 +466,8 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
         workspace["llm_model"],
         workspace["api_key"],
         workspace["temperature"],
-        workspace["system_prompt"],
+        system_prompt,
+        workspace.get("max_tokens", 1024),
     )
 
     response = await asyncio.to_thread(llm.chat, messages)
@@ -447,9 +500,12 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
       event: token             (one or more — streamed answer tokens)
       event: sources           (JSON: {"documents": [...], "web": [...]})
       event: done              (always last)
+      event: log               (intercepted by main.py — never forwarded to browser)
       event: error             (replaces token/sources on failure)
     """
     from llama_index.core.base.llms.types import ChatMessage, MessageRole
+
+    _start_time = _time.time()
 
     try:
         # ── 1. Rewrite if enabled ─────────────────────────────────────────────
@@ -465,7 +521,10 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
         async def _web_task():
             if not web_enabled:
                 return []
-            return await _searxng.web_search(effective_query)
+            num = max(1, min(int(workspace.get("searxng_num_results") or 3), 10))
+            suffix = (workspace.get("searxng_query_suffix") or "").strip()
+            web_query = f"{effective_query} {suffix}".strip() if suffix else effective_query
+            return await _searxng.web_search(web_query, num_results=num)
 
         nodes, web_results = await asyncio.gather(
             _retrieve_nodes(effective_query, workspace),
@@ -486,14 +545,21 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             yield "event: done\ndata: [DONE]\n\n"
             return
 
-        # ── 4. Build the prompt ───────────────────────────────────────────────
-        system_prompt = workspace["system_prompt"] or ""
+        # ── 5. Build the prompt ───────────────────────────────────────────────
+        system_prompt = (
+            workspace["system_prompt"]
+            or (DEFAULT_SYSTEM_PROMPT_WEB if web_enabled else DEFAULT_SYSTEM_PROMPT_RAG)
+        )
+        web_note = (
+            " When citing web results, include the source URL."
+            if web_enabled and web_results else ""
+        )
         user_prompt = (
             f"Context information is below.\n"
             f"---------------------\n"
             f"{context_str}\n"
             f"---------------------\n"
-            f"Given the context information and not prior knowledge, answer the query.\n"
+            f"Given the context information above and not prior knowledge, answer the query.{web_note}\n"
             f"Query: {question}\n"
             f"Answer: "
         )
@@ -510,13 +576,16 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             workspace["llm_model"],
             workspace["api_key"],
             workspace["temperature"],
-            workspace["system_prompt"],
+            system_prompt,
+            workspace.get("max_tokens", 1024),
         )
+        full_answer = ""
         try:
             response_gen = await llm.astream_chat(messages)
             async for chat_response in response_gen:
                 token = chat_response.delta
                 if token:
+                    full_answer += token
                     safe = token.replace('\n', '\\n')
                     yield f"event: token\ndata: {safe}\n\n"
         except Exception as exc:
@@ -537,6 +606,19 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
         sources_payload = {"documents": doc_sources, "web": web_results}
         yield f"event: sources\ndata: {json.dumps(sources_payload)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
+
+        # ── 8. Emit log event (intercepted by main.py, never reaches browser) ─
+        log_entry = {
+            "id": str(_uuid.uuid4()),
+            "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            "streamed": True,
+            "question": question,
+            "rewritten_query": rewritten,
+            "answer": full_answer.strip(),
+            "sources": sources_payload,
+            "duration_ms": int((_time.time() - _start_time) * 1000),
+        }
+        yield f"event: log\ndata: {json.dumps(log_entry)}\n\n"
 
     except Exception as exc:
         # Catch-all: ensure the stream always terminates cleanly even for

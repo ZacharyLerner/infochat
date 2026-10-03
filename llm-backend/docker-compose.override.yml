@@ -1,0 +1,13 @@
+# Development overrides — merged automatically by `docker compose up`
+# Mounts source code into the container and enables uvicorn hot-reload so
+# code changes take effect immediately without rebuilding the image.
+
+services:
+  backend:
+    volumes:
+      - .:/app                  # live source mount — lancedb/, settings.db, docs.json all persist on host
+    command: >
+      python -m uvicorn main:app
+      --host 0.0.0.0
+      --port 3001
+      --reload

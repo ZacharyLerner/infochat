@@ -4,7 +4,7 @@
    ===================================================== */
 
 // Use same origin so this works regardless of host/port
-const API_BASE = '';
+const API_BASE = '/api';
 
 // =====================================================
 // STATE
@@ -68,6 +68,11 @@ const queryRewrittenText= document.getElementById('query-rewritten-text');
 const globalSettingsForm = document.getElementById('global-settings-form');
 const globalSettingsMsg  = document.getElementById('global-settings-msg');
 
+const logEntries    = document.getElementById('log-entries');
+const logEmpty      = document.getElementById('log-empty');
+const logCount      = document.getElementById('log-count');
+const clearLogBtn   = document.getElementById('clear-log-btn');
+
 // =====================================================
 // HELPERS
 // =====================================================
@@ -84,6 +89,7 @@ async function apiFetch(path, options = {}) {
   const res = await fetch(API_BASE + path, {
     ...options,
     headers: {
+      'Accept': 'application/json',
       'X-API-Key': apiKey,
       ...(options.headers || {}),
     },
@@ -96,7 +102,7 @@ async function apiFetch(path, options = {}) {
 // =====================================================
 
 function loadApiKey() {
-  const stored = localStorage.getItem('rhodyrag_api_key');
+  const stored = sessionStorage.getItem('rhodyrag_api_key');
   if (stored) {
     apiKey = stored;
     return true;
@@ -106,20 +112,22 @@ function loadApiKey() {
 
 function saveApiKey(key) {
   apiKey = key;
-  localStorage.setItem('rhodyrag_api_key', key);
+  sessionStorage.setItem('rhodyrag_api_key', key);
 }
 
 function clearApiKey() {
   apiKey = '';
-  localStorage.removeItem('rhodyrag_api_key');
+  sessionStorage.removeItem('rhodyrag_api_key');
 }
 
 async function validateKey(key) {
   try {
-    const res = await fetch(API_BASE + '/settings', {
-      headers: { 'X-API-Key': key },
+    const res = await fetch('/api/settings', {
+      headers: { 'Accept': 'application/json', 'X-API-Key': key },
     });
-    return res.status !== 403;
+    if (res.status === 403) return false;
+    const ct = res.headers.get('content-type') || '';
+    return res.ok && ct.includes('application/json');
   } catch {
     return false;
   }
@@ -159,15 +167,128 @@ function showLogin() {
 function showApp() {
   loginScreen.classList.add('hidden');
   appScreen.classList.remove('hidden');
-  showView('workspaces');
-  loadWorkspaces();
+  // Restore the view for the current URL (handles direct loads, refreshes,
+  // and back/forward after login).  If the path is just '/', redirect to /workspaces.
+  router();
 }
 
 // =====================================================
-// NAVIGATION
+// ROUTING (History API)
 // =====================================================
 
-function showView(name) {
+// Tab name → panel element id mapping
+const TAB_PANELS = {
+  settings:  'ws-settings',
+  documents: 'ws-documents',
+  query:     'ws-query',
+  log:       'ws-log',
+};
+// Reverse: panel id → URL tab segment
+const PANEL_TO_TAB = Object.fromEntries(Object.entries(TAB_PANELS).map(([k, v]) => [v, k]));
+
+/**
+ * Navigate to a new path, pushing a history entry and triggering the router.
+ * Pass { replace: true } to replace instead of push (used during init).
+ */
+function navigateTo(path, { replace = false } = {}) {
+  if (replace) {
+    history.replaceState(null, '', path);
+  } else {
+    history.pushState(null, '', path);
+  }
+  router();
+}
+
+/**
+ * Parse the current pathname and activate the correct view/tab.
+ * Must only be called when the user is already authenticated.
+ *
+ * URL scheme:
+ *   /                          → redirect to /workspaces
+ *   /workspaces                → workspace list
+ *   /settings                  → global settings
+ *   /workspace/{slug}          → workspace detail, settings tab
+ *   /workspace/{slug}/settings → workspace detail, settings tab
+ *   /workspace/{slug}/documents→ workspace detail, documents tab
+ *   /workspace/{slug}/query    → workspace detail, query tab
+ *   /workspace/{slug}/log      → workspace detail, log tab
+ */
+async function router() {
+  const path = window.location.pathname;
+
+  // Root → workspaces
+  if (path === '/' || path === '') {
+    navigateTo('/workspaces', { replace: true });
+    return;
+  }
+
+  if (path === '/workspaces') {
+    _showViewDOM('workspaces');
+    loadWorkspaces();
+    return;
+  }
+
+  if (path === '/settings') {
+    _showViewDOM('settings');
+    loadGlobalSettings();
+    return;
+  }
+
+  // /workspace/{slug}[/{tab}]
+  const wsMatch = path.match(/^\/workspace\/([^/]+)(?:\/([^/]*))?$/);
+  if (wsMatch) {
+    const slug = decodeURIComponent(wsMatch[1]);
+    const tab  = wsMatch[2] || 'settings';
+
+    // Validate tab name
+    const panelId = TAB_PANELS[tab] || 'ws-settings';
+
+    // Fetch workspace to get name (and detect 404)
+    const res = await apiFetch(`/workspace/${slug}`);
+    if (!res.ok) {
+      // Workspace not found — redirect to list
+      navigateTo('/workspaces', { replace: true });
+      return;
+    }
+    const ws = await res.json();
+
+    // Clear query result when switching to a different workspace
+    if (slug !== currentWorkspaceSlug) {
+      if (activeStreamController) {
+        activeStreamController.abort();
+        activeStreamController = null;
+      }
+      queryAnswer.textContent = '';
+      querySources.innerHTML = '';
+      queryResult.classList.add('hidden');
+      queryRewriteDebug.classList.add('hidden');
+      queryRewrittenText.textContent = '';
+      queryInput.value = '';
+      querySubmitBtn.disabled = false;
+      querySubmitBtn.textContent = 'Ask';
+    }
+
+    // Update state
+    currentWorkspaceSlug = slug;
+    currentWorkspaceName = ws.name;
+    workspaceDetailName.textContent = ws.name;
+
+    // Activate the right tab in DOM (without pushing a new URL)
+    _activateTab(panelId);
+
+    _showViewDOM('workspace-detail');
+    loadWorkspaceSettings(slug);
+    loadDocList(slug);
+    if (panelId === 'ws-log') loadQueryLog(slug);
+    return;
+  }
+
+  // Unknown path → workspaces
+  navigateTo('/workspaces', { replace: true });
+}
+
+/** Internal: toggle the three top-level view sections without touching the URL. */
+function _showViewDOM(name) {
   viewWorkspaces.classList.add('hidden');
   viewSettings.classList.add('hidden');
   viewWorkspaceDetail.classList.add('hidden');
@@ -178,14 +299,47 @@ function showView(name) {
     viewWorkspaces.classList.remove('hidden');
   } else if (name === 'settings') {
     viewSettings.classList.remove('hidden');
-    loadGlobalSettings();
   } else if (name === 'workspace-detail') {
     viewWorkspaceDetail.classList.remove('hidden');
   }
 }
 
+/** Internal: activate a tab panel by its element id without touching the URL. */
+function _activateTab(panelId) {
+  tabBtns.forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === panelId);
+  });
+  tabPanels.forEach(p => {
+    p.classList.toggle('hidden', p.id !== panelId);
+  });
+}
+
+// =====================================================
+// NAVIGATION
+// =====================================================
+
+/**
+ * Public showView — updates the URL and switches the view.
+ * For workspace-detail, prefer openWorkspace() or the tab handlers instead.
+ */
+function showView(name) {
+  if (name === 'workspaces') {
+    navigateTo('/workspaces');
+  } else if (name === 'settings') {
+    navigateTo('/settings');
+  } else {
+    // workspace-detail without a slug context — just switch DOM
+    _showViewDOM(name);
+  }
+}
+
 navBtns.forEach(btn => {
   btn.addEventListener('click', () => showView(btn.dataset.view));
+});
+
+// Browser back/forward
+window.addEventListener('popstate', () => {
+  if (apiKey) router();
 });
 
 // =====================================================
@@ -194,10 +348,14 @@ navBtns.forEach(btn => {
 
 tabBtns.forEach(btn => {
   btn.addEventListener('click', () => {
-    tabBtns.forEach(b => b.classList.remove('active'));
-    tabPanels.forEach(p => p.classList.add('hidden'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.remove('hidden');
+    if (!currentWorkspaceSlug) return;
+    const tab = PANEL_TO_TAB[btn.dataset.tab] || 'settings';
+    // Push the tab into the URL — popstate/router will handle DOM activation.
+    // Use replace if we're already on a workspace URL to avoid stacking tab
+    // entries in history (navigating between tabs shouldn't fill up history).
+    const currentIsWorkspace = /^\/workspace\//.test(window.location.pathname);
+    navigateTo(`/workspace/${encodeURIComponent(currentWorkspaceSlug)}/${tab}`,
+               { replace: currentIsWorkspace });
   });
 });
 
@@ -271,34 +429,17 @@ async function deleteWorkspace(slug) {
 // WORKSPACE DETAIL
 // =====================================================
 
-function openWorkspace(slug, name) {
-  currentWorkspaceSlug = slug;
-  currentWorkspaceName = name;
-  workspaceDetailName.textContent = name;
-
-  // Reset tabs to first
-  tabBtns.forEach(b => b.classList.remove('active'));
-  tabPanels.forEach(p => p.classList.add('hidden'));
-  tabBtns[0].classList.add('active');
-  document.getElementById('ws-settings').classList.remove('hidden');
-
-  // Clear query result
-  queryAnswer.textContent = '';
-  querySources.innerHTML = '';
-  queryResult.classList.add('hidden');
-  queryRewriteDebug.classList.add('hidden');
-  queryRewrittenText.textContent = '';
-  queryInput.value = '';
-
-  showView('workspace-detail');
-  loadWorkspaceSettings(slug);
-  loadDocList(slug);
+function openWorkspace(slug, name, tab) {
+  // Navigate to the URL — router() will handle loading data and switching DOM.
+  // If a specific tab is given, navigate to /workspace/{slug}/{tab},
+  // otherwise land on the settings tab (default).
+  const tabSegment = tab && TAB_PANELS[tab] ? `/${tab}` : '';
+  navigateTo(`/workspace/${encodeURIComponent(slug)}${tabSegment}`);
 }
 
 backToWorkspaces.addEventListener('click', () => {
   currentWorkspaceSlug = null;
-  showView('workspaces');
-  loadWorkspaces();
+  navigateTo('/workspaces');
 });
 
 // =====================================================
@@ -306,20 +447,53 @@ backToWorkspaces.addEventListener('click', () => {
 // =====================================================
 
 async function loadWorkspaceSettings(slug) {
-  const res = await apiFetch(`/workspace/${slug}`);
-  if (!res.ok) return;
-  const ws = await res.json();
+  const [wsRes, defaultsRes] = await Promise.all([
+    apiFetch(`/workspace/${slug}`),
+    apiFetch('/defaults'),
+  ]);
+  if (!wsRes.ok) return;
+  const ws = await wsRes.json();
   fillForm(workspaceSettingsForm, ws);
+
+  let defaults = null;
+  if (defaultsRes.ok) {
+    defaults = await defaultsRes.json();
+    workspaceSettingsForm._promptDefaults = defaults;
+
+    // Fill blank prompts with built-in defaults
+    const spEl = workspaceSettingsForm.elements['system_prompt'];
+    const webEnabled = workspaceSettingsForm.elements['searxng_enabled'].checked;
+    if (spEl && !spEl.value) {
+      spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
+    }
+    const rpEl = workspaceSettingsForm.elements['rewrite_prompt'];
+    if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
+  }
+
+  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
+  if (!workspaceSettingsForm._toggleListenerAttached) {
+    workspaceSettingsForm._toggleListenerAttached = true;
+    workspaceSettingsForm.elements['searxng_enabled'].addEventListener('change', function () {
+      const d = workspaceSettingsForm._promptDefaults;
+      if (!d) return;
+      const spEl = workspaceSettingsForm.elements['system_prompt'];
+      if (!spEl) return;
+      const cur = spEl.value;
+      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
+        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
+      }
+    });
+  }
 }
 
 workspaceSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = formToObj(workspaceSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
-    'similarity_threshold', 'system_prompt', 'embed_api_key',
-    'rewrite_model', 'rewrite_prompt',
+    'similarity_threshold', 'system_prompt', 'embed_api_key', 'max_tokens',
+    'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens', 'searxng_num_results']);
   data.searxng_enabled = workspaceSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(wsSettingsMsg, 'Saving...');
@@ -346,13 +520,50 @@ newWorkspaceBtn.addEventListener('click', async () => {
   createWorkspaceMsg.textContent = '';
   createModal.classList.remove('hidden');
 
-  // Pre-fill with current global defaults so the admin sees what will be used
   resetModelSelects();
   showCreateStep(1);
-  const res = await apiFetch('/settings');
-  if (res.ok) {
-    const settings = await res.json();
+
+  // Fetch global settings and built-in defaults in parallel
+  const [settingsRes, defaultsRes] = await Promise.all([
+    apiFetch('/settings'),
+    apiFetch('/defaults'),
+  ]);
+
+  let defaults = null;
+  if (defaultsRes.ok) {
+    defaults = await defaultsRes.json();
+    createWorkspaceForm._promptDefaults = defaults;
+  }
+
+  if (settingsRes.ok) {
+    const settings = await settingsRes.json();
     fillForm(createWorkspaceForm, settings);
+
+    // Fill blank prompts with built-in defaults
+    if (defaults) {
+      const spEl = createWorkspaceForm.elements['system_prompt'];
+      const webEnabled = createWorkspaceForm.elements['searxng_enabled'].checked;
+      if (spEl && !spEl.value) {
+        spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
+      }
+      const rpEl = createWorkspaceForm.elements['rewrite_prompt'];
+      if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
+    }
+  }
+
+  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
+  if (!createWorkspaceForm._toggleListenerAttached) {
+    createWorkspaceForm._toggleListenerAttached = true;
+    createWorkspaceForm.elements['searxng_enabled'].addEventListener('change', function () {
+      const d = createWorkspaceForm._promptDefaults;
+      if (!d) return;
+      const spEl = createWorkspaceForm.elements['system_prompt'];
+      if (!spEl) return;
+      const cur = spEl.value;
+      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
+        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
+      }
+    });
   }
 });
 
@@ -456,10 +667,6 @@ closeModalBtn.addEventListener('click', () => {
   createModal.classList.add('hidden');
 });
 
-createModal.addEventListener('click', (e) => {
-  if (e.target === createModal) createModal.classList.add('hidden');
-});
-
 createWorkspaceForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   // Enter on an earlier step advances instead of creating
@@ -467,10 +674,10 @@ createWorkspaceForm.addEventListener('submit', async (e) => {
   const data = formToObj(createWorkspaceForm, [
     'name', 'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt',
-    'rewrite_model', 'rewrite_prompt',
+    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens', 'searxng_num_results']);
   data.searxng_enabled = createWorkspaceForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(createWorkspaceMsg, 'Creating...');
@@ -680,6 +887,11 @@ queryForm.addEventListener('submit', async (e) => {
     activeStreamController = null;
     querySubmitBtn.disabled = false;
     querySubmitBtn.textContent = 'Ask';
+    // Refresh log tab if it's currently visible
+    const logTab = document.getElementById('ws-log');
+    if (logTab && !logTab.classList.contains('hidden') && currentWorkspaceSlug) {
+      loadQueryLog(currentWorkspaceSlug);
+    }
   }
 });
 
@@ -754,14 +966,158 @@ function renderSources(sources) {
 }
 
 // =====================================================
+// QUERY LOG
+// =====================================================
+
+async function loadQueryLog(slug) {
+  const res = await apiFetch(`/workspace/${slug}/logs`);
+  if (!res.ok) return;
+  const entries = await res.json();
+  renderQueryLog(entries);
+}
+
+function renderQueryLog(entries) {
+  logEntries.innerHTML = '';
+
+  if (!entries.length) {
+    logEmpty.classList.remove('hidden');
+    logCount.textContent = '';
+    return;
+  }
+
+  logEmpty.classList.add('hidden');
+  logCount.textContent = `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`;
+
+  entries.forEach(entry => {
+    const card = document.createElement('div');
+    card.className = 'log-entry';
+
+    // Format timestamp
+    const ts = entry.timestamp ? new Date(entry.timestamp) : null;
+    const tsStr = ts ? ts.toLocaleString() : '—';
+    const durStr = entry.duration_ms != null ? `${(entry.duration_ms / 1000).toFixed(1)}s` : '';
+
+    // Header (always visible, clickable to expand)
+    const header = document.createElement('div');
+    header.className = 'log-entry-header';
+    const rewroteNote = (entry.rewritten_query && entry.rewritten_query !== entry.question)
+      ? `<div class="log-entry-rewritten-preview">&rarr; ${escHtml(entry.rewritten_query)}</div>`
+      : '';
+    header.innerHTML = `
+      <div class="log-entry-left">
+        <div class="log-entry-question">${escHtml(entry.question || '')}</div>
+        ${rewroteNote}
+      </div>
+      <div class="log-entry-meta">
+        <span>${escHtml(tsStr)}</span>
+        ${durStr ? `<span class="log-duration-badge">${escHtml(durStr)}</span>` : ''}
+      </div>
+    `;
+
+    // Body (hidden by default)
+    const body = document.createElement('div');
+    body.className = 'log-entry-body hidden';
+
+    // Rewritten query (show whenever present)
+    if (entry.rewritten_query) {
+      const rw = document.createElement('div');
+      rw.innerHTML = `<div class="log-section-label">Rewritten Query</div>
+        <div class="log-rewritten">${escHtml(entry.rewritten_query)}</div>`;
+      body.appendChild(rw);
+    }
+
+    // Answer
+    const answerDiv = document.createElement('div');
+    answerDiv.innerHTML = `<div class="log-section-label">Answer</div>
+      <div class="log-answer">${escHtml(entry.answer || '')}</div>`;
+    body.appendChild(answerDiv);
+
+    // Document sources
+    const docs = (entry.sources && entry.sources.documents) || [];
+    if (docs.length) {
+      const docsDiv = document.createElement('div');
+      const chips = docs.map(d =>
+        `<span class="log-source-chip">${escHtml(d.filename || 'Unknown')}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
+      ).join('');
+      docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
+        <div class="log-source-chips">${chips}</div>`;
+      body.appendChild(docsDiv);
+    }
+
+    // Web sources
+    const web = (entry.sources && entry.sources.web) || [];
+    if (web.length) {
+      const webDiv = document.createElement('div');
+      const links = web.map(r =>
+        `<a class="log-web-link" href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer">${escHtml(r.title || r.url || 'Web result')}</a>`
+      ).join('');
+      webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
+        <div class="log-web-links">${links}</div>`;
+      body.appendChild(webDiv);
+    }
+
+    // Toggle expand/collapse on header click
+    header.addEventListener('click', () => {
+      body.classList.toggle('hidden');
+    });
+
+    card.appendChild(header);
+    card.appendChild(body);
+    logEntries.appendChild(card);
+  });
+}
+
+clearLogBtn.addEventListener('click', async () => {
+  if (!currentWorkspaceSlug) return;
+  if (!confirm('Clear all log entries for this workspace? This cannot be undone.')) return;
+  const res = await apiFetch(`/workspace/${currentWorkspaceSlug}/logs`, { method: 'DELETE' });
+  if (res.ok || res.status === 204) {
+    renderQueryLog([]);
+  }
+});
+
+// =====================================================
 // GLOBAL SETTINGS
 // =====================================================
 
 async function loadGlobalSettings() {
-  const res = await apiFetch('/settings');
-  if (!res.ok) return;
-  const settings = await res.json();
+  const [settingsRes, defaultsRes] = await Promise.all([
+    apiFetch('/settings'),
+    apiFetch('/defaults'),
+  ]);
+  if (!settingsRes.ok) return;
+  const settings = await settingsRes.json();
   fillForm(globalSettingsForm, settings);
+
+  let defaults = null;
+  if (defaultsRes.ok) {
+    defaults = await defaultsRes.json();
+    globalSettingsForm._promptDefaults = defaults;
+
+    // Fill blank prompts with built-in defaults
+    const spEl = globalSettingsForm.elements['system_prompt'];
+    const webEnabled = globalSettingsForm.elements['searxng_enabled'].checked;
+    if (spEl && !spEl.value) {
+      spEl.value = webEnabled ? defaults.default_system_prompt_web : defaults.default_system_prompt_rag;
+    }
+    const rpEl = globalSettingsForm.elements['rewrite_prompt'];
+    if (rpEl && !rpEl.value) rpEl.value = defaults.default_rewrite_prompt;
+  }
+
+  // Attach the searxng toggle → swap system prompt listener (idempotent via flag)
+  if (!globalSettingsForm._toggleListenerAttached) {
+    globalSettingsForm._toggleListenerAttached = true;
+    globalSettingsForm.elements['searxng_enabled'].addEventListener('change', function () {
+      const d = globalSettingsForm._promptDefaults;
+      if (!d) return;
+      const spEl = globalSettingsForm.elements['system_prompt'];
+      if (!spEl) return;
+      const cur = spEl.value;
+      if (cur === d.default_system_prompt_rag || cur === d.default_system_prompt_web) {
+        spEl.value = this.checked ? d.default_system_prompt_web : d.default_system_prompt_rag;
+      }
+    });
+  }
 }
 
 globalSettingsForm.addEventListener('submit', async (e) => {
@@ -769,10 +1125,10 @@ globalSettingsForm.addEventListener('submit', async (e) => {
   const data = formToObj(globalSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
     'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt',
-    'rewrite_model', 'rewrite_prompt',
+    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens', 'searxng_num_results']);
   data.searxng_enabled = globalSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(globalSettingsMsg, 'Saving...');
@@ -806,8 +1162,9 @@ function fillForm(form, obj) {
   });
 }
 
-// Fields that should always be included even when empty (to allow clearing them)
-const _ALWAYS_INCLUDE = new Set(['rewrite_model', 'rewrite_prompt']);
+// Fields that should always be included even when empty (to allow clearing them
+// back to the built-in default at runtime)
+const _ALWAYS_INCLUDE = new Set(['rewrite_model', 'rewrite_prompt', 'system_prompt', 'searxng_query_suffix']);
 
 function formToObj(form, fields) {
   const obj = {};

@@ -73,8 +73,11 @@ def _embed_kwargs(workspace: dict) -> dict:
       - 'direct-openai/<model>' — calls api.openai.com directly using embed_api_key,
         bypassing the university gateway.
       - anything else — routes through the gateway (config.API_BASE) using
-        api_key. Gateway model ids (e.g. 'its_rhodyrag_prod/qwen3-embed-8b-selfhosted')
-        get an 'openai/' prefix since the gateway is OpenAI-compatible.
+        embed_api_key if set, otherwise falling back to api_key. This lets
+        a workspace's embedding model live under a different LiteLLM key/project
+        than its chat model. Gateway model ids (e.g.
+        'its_rhodyrag_prod/qwen3-embed-8b-selfhosted') get an 'openai/' prefix
+        since the gateway is OpenAI-compatible.
     """
     embed_model = _resolve_embed_model(workspace)
     if embed_model.startswith("direct-openai/"):
@@ -85,7 +88,11 @@ def _embed_kwargs(workspace: dict) -> dict:
         }
     if not embed_model.startswith("openai/"):
         embed_model = f"openai/{embed_model}"
-    return {"model": embed_model, "api_base": config.API_BASE, "api_key": workspace["api_key"]}
+    return {
+        "model": embed_model,
+        "api_base": config.API_BASE,
+        "api_key": workspace["embed_api_key"] or workspace["api_key"],
+    }
 
 
 def _format_query(workspace: dict, text: str) -> str:
