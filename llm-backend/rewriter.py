@@ -37,13 +37,11 @@ def _sync_rewrite(
 
     try:
         # temperature=0.0 for deterministic, reproducible rewrites
-        # max_tokens=128 — rewrites are short; cap cost and latency
         llm = build_llm(
             llm_model=rewrite_model,
             api_key=api_key,
             temperature=0.0,
             system_prompt="",   # system prompt injected manually below
-            max_tokens=128,
         )
 
         messages: list[ChatMessage] = [

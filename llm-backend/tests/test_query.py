@@ -494,6 +494,16 @@ class TestBuildLLM:
             llm = query.build_llm("openai/gpt-4o", "key", 0.5, "sys")
             assert isinstance(llm, query._GatewayLiteLLM)
 
+    def test_gateway_model_id_gets_openai_prefix(self):
+        with patch("query.LiteLLM.__init__", return_value=None) as init:
+            query.build_llm("its_sd_discord_bot_dev/pt3-claude-opus-4.7-1m-us", "key", 0.5)
+            assert init.call_args.kwargs["model"] == "openai/its_sd_discord_bot_dev/pt3-claude-opus-4.7-1m-us"
+
+    def test_prefixed_model_not_double_prefixed(self):
+        with patch("query.LiteLLM.__init__", return_value=None) as init:
+            query.build_llm("openai/gpt-4o", "key", 0.5)
+            assert init.call_args.kwargs["model"] == "openai/gpt-4o"
+
     def test_metadata_context_window_overridden(self):
         """_GatewayLiteLLM.metadata must return our fixed large context window."""
         llm = query._GatewayLiteLLM.__new__(query._GatewayLiteLLM)

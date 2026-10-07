@@ -85,7 +85,16 @@ class _GatewayLiteLLM(LiteLLM):
         )
 
 
-def build_llm(llm_model: str, api_key: str, temperature: float, system_prompt: str = "") -> LiteLLM:
+def build_llm(
+    llm_model: str,
+    api_key: str,
+    temperature: float,
+    system_prompt: str = "",
+) -> LiteLLM:
+    # Gateway model ids (e.g. 'its_sd_discord_bot_dev/pt3-claude-opus-4.7-1m-us')
+    # get an 'openai/' prefix so LiteLLM treats the gateway as OpenAI-compatible.
+    if not llm_model.startswith("openai/"):
+        llm_model = f"openai/{llm_model}"
     return _GatewayLiteLLM(
         model=llm_model,
         api_base=config.API_BASE,
