@@ -19,7 +19,8 @@ Test classes
   TestParseUrlList         — website-list parsing (separators, dedupe, invalid entries)
   TestListScrapeJobCRUD    — mode="list" create / update / list / discover
   TestListScrapeJobRun     — list jobs scrape every URL; dropped URLs are removed
-  TestScrapeWebsiteMd      — page cleanup keeps main content; PDFs routed to docling
+  TestScrapeWebsite        — page cleanup keeps main content; PDFs routed to docling;
+                             output is DoclingDocument JSON with origin.uri set
 """
 
 import io
@@ -1421,8 +1422,46 @@ class TestListScrapeJobRun:
         assert [p.source_url for p in pages] == ["https://example.com/"]
 
 
-class TestScrapeWebsiteMd:
-    """scrape_website_md cleanup and PDF routing, with the network fetch stubbed out."""
+    def test_pre_docling_page_is_reuploaded_as_docling_json(self, client: TestClient, tmp_path, monkeypatch):
+        """A page scraped as Markdown is re-sent as DoclingDocument JSON and its old .md cache removed."""
+        import main as _main
+        from models import File as FileModel
+
+        monkeypatch.setattr(_main, "DEBUG_UPLOAD_DIR", str(tmp_path))
+        monkeypatch.setattr(_main, "scrape_website", lambda url: '{"schema_name": "DoclingDocument"}')
+        monkeypatch.setattr(_main, "LLM_upload_document", lambda f, name, ws: f"new-{name}")
+        removed = []
+        monkeypatch.setattr(_main, "LLM_remove_document", lambda ws, doc_id: removed.append(doc_id) or True)
+
+        job = _create_job(client, name="Legacy Job", mode="list", urls=["https://example.com/"])
+        ws_dir = tmp_path / TEST_SLUG
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "example_com_index.md").write_text("old markdown")
+        with _TestSessionLocal() as db:
+            db.add(FileModel(id="old-md-id", filename="example_com_index.md", original_extension=".html",
+                             workspace_id=TEST_SLUG, category="scrape_Legacy Job",
+                             source_url="https://example.com/", scrape_job_id=job["id"],
+                             content_hash="hash-of-old-markdown"))
+            db.commit()
+
+        events = self._run(client, job["id"])
+        assert [e["status"] for e in events if e.get("url")][-1] == "changed"
+        assert removed == ["old-md-id"]
+        assert not (ws_dir / "example_com_index.md").exists()
+        assert (ws_dir / "example_com_index.docling.json").exists()
+        with _TestSessionLocal() as db:
+            rec = db.query(FileModel).filter(FileModel.scrape_job_id == job["id"]).one()
+        assert (rec.id, rec.filename) == ("new-example_com_index.docling.json", "example_com_index.docling.json")
+
+
+def _doc_text(doc_json: str) -> str:
+    """All text in a DoclingDocument JSON string, for content assertions."""
+    import json
+    return "\n".join(t["text"] for t in json.loads(doc_json)["texts"])
+
+
+class TestScrapeWebsite:
+    """scrape_website cleanup and PDF routing, with the network fetch stubbed out."""
 
     ARTICLE = " ".join(f"Nutrition sentence number {i} about healthy eating." for i in range(40))
 
@@ -1432,23 +1471,23 @@ class TestScrapeWebsiteMd:
         from types import SimpleNamespace
         resp = SimpleNamespace(status_code=200, content=content, headers={"content-type": content_type})
         monkeypatch.setattr(decling_conversion.browser_requests, "get", lambda *a, **k: resp)
-        return decling_conversion.scrape_website_md
+        return lambda url: _doc_text(decling_conversion.scrape_website(url))
 
     def test_page_level_form_is_kept(self, monkeypatch):
         """ASP.NET-style pages wrap everything in one <form>; its content must survive."""
         html = f'<html><body><form id="aspnetForm"><h1>Picky Eaters</h1><p>{self.ARTICLE}</p></form></body></html>'
-        md = self._fake_fetch(monkeypatch, html.encode())("https://example.com/p.aspx")
-        assert "Picky Eaters" in md
-        assert "sentence number 39" in md
+        text = self._fake_fetch(monkeypatch, html.encode())("https://example.com/p.aspx")
+        assert "Picky Eaters" in text
+        assert "sentence number 39" in text
 
     def test_small_form_is_removed(self, monkeypatch):
         html = (
             f"<html><body><h1>Article</h1><p>{self.ARTICLE}</p>"
             '<form><label>Subscribe to our newsletter today</label><input name="email"></form></body></html>'
         )
-        md = self._fake_fetch(monkeypatch, html.encode())("https://example.com/a")
-        assert "sentence number 39" in md
-        assert "newsletter" not in md
+        text = self._fake_fetch(monkeypatch, html.encode())("https://example.com/a")
+        assert "sentence number 39" in text
+        assert "newsletter" not in text
 
     def test_with_breadcrumb_main_is_kept_but_breadcrumbs_removed(self, monkeypatch):
         html = (
@@ -1456,35 +1495,54 @@ class TestScrapeWebsiteMd:
             '<ol class="usda-breadcrumb-list"><li class="usda-breadcrumb-item">Home Crumb</li></ol>'
             f"<h1>Meal Planning</h1><p>{self.ARTICLE}</p></main></body></html>"
         )
-        md = self._fake_fetch(monkeypatch, html.encode())("https://example.gov/a")
-        assert "Meal Planning" in md
-        assert "sentence number 39" in md
-        assert "Home Crumb" not in md
+        text = self._fake_fetch(monkeypatch, html.encode())("https://example.gov/a")
+        assert "Meal Planning" in text
+        assert "sentence number 39" in text
+        assert "Home Crumb" not in text
 
     def test_loader_div_is_removed(self, monkeypatch):
         html = f'<html><body><div class="page-spinner">Loading...</div><p>{self.ARTICLE}</p></body></html>'
-        md = self._fake_fetch(monkeypatch, html.encode())("https://example.com/a")
-        assert "Loading" not in md
-        assert "sentence number 39" in md
+        text = self._fake_fetch(monkeypatch, html.encode())("https://example.com/a")
+        assert "Loading" not in text
+        assert "sentence number 39" in text
+
+    def test_page_is_docling_document_with_source_url(self, monkeypatch):
+        """The scraped URL is stored as origin.uri so the backend can cite it."""
+        import json
+        import decling_conversion
+        from docling_core.types.doc import DoclingDocument
+        html = f"<html><head><title>Healthy Eating</title></head><body><p>{self.ARTICLE}</p></body></html>"
+        self._fake_fetch(monkeypatch, html.encode())
+        doc_json = decling_conversion.scrape_website("https://example.com/food/healthy-eating")
+        doc = DoclingDocument.model_validate(json.loads(doc_json))
+        assert str(doc.origin.uri) == "https://example.com/food/healthy-eating"
+        assert doc.origin.filename == "healthy-eating.html"
+        assert doc_json == decling_conversion.scrape_website("https://example.com/food/healthy-eating"), \
+            "Output must be stable so unchanged pages hash the same"
+
+    def test_empty_page_after_cleanup_raises(self, monkeypatch):
+        html = f"<html><body><nav>{self.ARTICLE}</nav></body></html>"
+        with pytest.raises(ValueError, match="empty content"):
+            self._fake_fetch(monkeypatch, html.encode())("https://example.com/a")
 
     def test_pdf_response_is_converted_as_pdf(self, monkeypatch):
         import decling_conversion
         seen = {}
 
-        def fake_convert(content, name):
-            seen["name"] = name
-            return "# PDF Title\n\nPDF body text"
+        def fake_convert(content, name, source_url=None):
+            seen["name"], seen["source_url"] = name, source_url
+            return '{"pdf": true}'
 
         monkeypatch.setattr(decling_conversion, "convert_file", fake_convert)
-        scrape = self._fake_fetch(monkeypatch, b"%PDF-1.7 fake bytes", "application/pdf")
-        assert scrape("https://example.com/doc.pdf") == "# PDF Title\n\nPDF body text"
-        assert seen["name"] == "page.pdf"
+        self._fake_fetch(monkeypatch, b"%PDF-1.7 fake bytes", "application/pdf")
+        assert decling_conversion.scrape_website("https://example.com/docs/Intent-to-Graduate.pdf") == '{"pdf": true}'
+        assert seen == {"name": "Intent-to-Graduate.pdf", "source_url": "https://example.com/docs/Intent-to-Graduate.pdf"}
 
     def test_pdf_detected_by_magic_bytes(self, monkeypatch):
         import decling_conversion
-        monkeypatch.setattr(decling_conversion, "convert_file", lambda c, n: "PDF body")
-        scrape = self._fake_fetch(monkeypatch, b"%PDF-1.4 bytes", "application/octet-stream")
-        assert scrape("https://example.com/download?id=1") == "PDF body"
+        monkeypatch.setattr(decling_conversion, "convert_file", lambda c, n, source_url=None: "PDF doc")
+        self._fake_fetch(monkeypatch, b"%PDF-1.4 bytes", "application/octet-stream")
+        assert decling_conversion.scrape_website("https://example.com/download?id=1") == "PDF doc"
 
     def test_http_error_raises_with_status(self, monkeypatch):
         import decling_conversion
@@ -1494,7 +1552,53 @@ class TestScrapeWebsiteMd:
             lambda *a, **k: SimpleNamespace(status_code=403, content=b"", headers={}),
         )
         with pytest.raises(ValueError, match="HTTP 403"):
-            decling_conversion.scrape_website_md("https://example.com/blocked")
+            decling_conversion.scrape_website("https://example.com/blocked")
+
+
+class TestConvertFile:
+    """convert_file returns DoclingDocument JSON; uploaded HTML keeps the address it was saved from."""
+
+    BODY = b"<body><h1>Adobe</h1><p>How to request an Adobe license for faculty and staff.</p></body></html>"
+
+    @staticmethod
+    def _uri(doc_json):
+        import json
+        return json.loads(doc_json)["origin"].get("uri")
+
+    @pytest.mark.parametrize("head", [
+        b"<!-- saved from url=(0049)https://sites.google.com/uri.edu/wiki/adobe -->\n<html><head></head>",
+        b'<html><head><meta property="og:url" content="https://sites.google.com/uri.edu/wiki/adobe"></head>',
+        b'<html><head><link href="https://sites.google.com/uri.edu/wiki/adobe" rel="canonical"></head>',
+    ])
+    def test_saved_html_source_url_is_detected(self, head):
+        from decling_conversion import convert_file
+        assert self._uri(convert_file(head + self.BODY, "Adobe.html")) == "https://sites.google.com/uri.edu/wiki/adobe"
+
+    def test_html_without_source_url_has_no_uri(self):
+        from decling_conversion import convert_file
+        assert self._uri(convert_file(b"<html><head></head>" + self.BODY, "Adobe.html")) is None
+
+    def test_relative_canonical_is_ignored(self):
+        from decling_conversion import convert_file
+        head = b'<html><head><link rel="canonical" href="/wiki/adobe"></head>'
+        assert self._uri(convert_file(head + self.BODY, "Adobe.html")) is None
+
+    def test_explicit_source_url_wins(self):
+        from decling_conversion import convert_file
+        head = b'<html><head><link rel="canonical" href="https://other.example/x"></head>'
+        doc_json = convert_file(head + self.BODY, "Adobe.html", source_url="https://uri.edu/adobe")
+        assert self._uri(doc_json) == "https://uri.edu/adobe"
+
+    def test_markdown_input_is_converted_with_structure(self):
+        import json
+        from decling_conversion import convert_file
+        doc = json.loads(convert_file(b"# Wi-Fi\n\n## Gaming Devices\n\nRegister the MAC address.", "wifi.md"))
+        labels = {t["label"] for t in doc["texts"]}
+        assert "section_header" in labels or "title" in labels
+
+    def test_docling_filename(self):
+        from decling_conversion import docling_filename
+        assert docling_filename("Quiz v2.docx") == "Quiz v2.docling.json"
 
 
 # ===========================================================================
@@ -1503,7 +1607,7 @@ class TestScrapeWebsiteMd:
 
 class TestDebugUploadScoping:
     """
-    Verify that document uploads write .md files into
+    Verify that document uploads write their debug copies into
     debug_uploads/{workspace_slug}/ rather than a flat directory.
 
     LLM_upload_document is mocked so these tests are purely local —
@@ -1549,6 +1653,36 @@ class TestDebugUploadScoping:
         assert ws_dir.is_dir(), "Workspace subdirectory was not created"
         files = list(ws_dir.iterdir())
         assert len(files) == 1, f"Expected 1 debug file, got: {files}"
+
+    def test_upload_html_creates_docling_json_debug_file(self, client: TestClient, tmp_path, monkeypatch):
+        """Converted files are sent and cached as <name>.docling.json, with the page's URL."""
+        import json
+        import main as _main
+
+        monkeypatch.setattr(_main, "DEBUG_UPLOAD_DIR", str(tmp_path))
+        sent = {}
+
+        def _fake_upload(f, name, ws):
+            sent[name] = f.getvalue()
+            return f"doc-id-{name}"
+
+        monkeypatch.setattr(_main, "LLM_upload_document", _fake_upload)
+
+        html = (
+            b'<html><head><link rel="canonical" href="https://example.edu/wifi"></head>'
+            b"<body><h1>Wi-Fi</h1><p>Register gaming devices at rhodywifi.</p></body></html>"
+        )
+        r = client.post(
+            f"/api/v1/workspaces/{TEST_SLUG}/upload",
+            files=[("uploaded_files", ("wifi.html", io.BytesIO(html), "text/html"))],
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["filename"] == "wifi.html"
+        assert list(sent) == ["wifi.docling.json"]
+
+        debug_file = tmp_path / TEST_SLUG / "wifi.docling.json"
+        assert debug_file.read_text() == sent["wifi.docling.json"]
+        assert json.loads(debug_file.read_text())["origin"]["uri"] == "https://example.edu/wifi"
 
     def test_no_debug_file_when_dir_not_configured(self, client: TestClient, tmp_path, monkeypatch):
         """When DEBUG_UPLOAD_DIR is empty string, no files are written."""
@@ -1601,7 +1735,7 @@ class TestDebugUploadScoping:
 class TestDebugFileCleanupOnDelete:
     """
     Verify that deleting a file (single or bulk) also removes the cached
-    debug .md copy from debug_uploads/{workspace_id}/.
+    debug copy from debug_uploads/{workspace_id}/.
 
     Both LLM_upload_document and LLM_remove_document are mocked so these
     tests are purely local.
@@ -1662,6 +1796,26 @@ class TestDebugFileCleanupOnDelete:
 
         remaining = list(ws_dir.iterdir())
         assert remaining == [], f"Expected no debug files after bulk delete, got: {remaining}"
+
+    def test_delete_removes_pre_docling_md_copy(self, client: TestClient, tmp_path, monkeypatch):
+        """Files converted before the switch to Docling have a .md debug copy; delete removes it too."""
+        import main as _main
+        from models import File as FileModel
+
+        monkeypatch.setattr(_main, "DEBUG_UPLOAD_DIR", str(tmp_path))
+        monkeypatch.setattr(_main, "LLM_remove_document", lambda ws, doc_id: True)
+
+        ws_dir = tmp_path / TEST_SLUG
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "legacy.md").write_text("old markdown")
+        with _TestSessionLocal() as db:
+            db.add(FileModel(id="legacy-doc-id", filename="legacy.docx", original_extension=".docx",
+                             workspace_id=TEST_SLUG, category="uploaded_file"))
+            db.commit()
+
+        del_r = client.delete("/delete/legacy-doc-id")
+        assert del_r.status_code == 200, del_r.text
+        assert not (ws_dir / "legacy.md").exists()
 
     def test_delete_without_debug_dir_does_not_error(self, client: TestClient, monkeypatch):
         """Deleting a file when DEBUG_UPLOAD_DIR is unset doesn't raise."""
@@ -1794,7 +1948,7 @@ class TestDebugRsync:
 class TestReembed:
     """
     Route: POST /api/v1/workspaces/{workspace_id}/reembed
-    Reads cached .md files from debug_uploads/{workspace_id}/ and re-uploads
+    Reads cached .docling.json and pre-Docling .md files from debug_uploads/{workspace_id}/ and re-uploads
     them to the RAG backend.
     """
 
@@ -1837,6 +1991,32 @@ class TestReembed:
         assert rec is not None
         assert rec.id == "new-doc-id-embed_me.md"
 
+    def test_reembed_uploads_docling_json_for_converted_file(self, client: TestClient, tmp_path, monkeypatch):
+        """A converted upload's .docling.json cache is re-sent and matched to its original filename."""
+        import main as _main
+        from models import File as FileModel
+
+        monkeypatch.setattr(_main, "DEBUG_UPLOAD_DIR", str(tmp_path))
+        sent = []
+        monkeypatch.setattr(_main, "LLM_upload_document", lambda f, name, ws: sent.append(name) or f"new-{name}")
+
+        ws_dir = tmp_path / TEST_SLUG
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / "quiz.docling.json").write_text('{"schema_name": "DoclingDocument"}')
+        with _TestSessionLocal() as db:
+            db.add(FileModel(id="old-quiz-id", filename="quiz.docx", original_extension=".docx",
+                             workspace_id=TEST_SLUG, category="uploaded_file"))
+            db.commit()
+
+        r = client.post(f"/api/v1/workspaces/{TEST_SLUG}/reembed")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"reembedded": 1, "failed": []}
+        assert sent == ["quiz.docling.json"]
+
+        with _TestSessionLocal() as db:
+            rec = db.query(FileModel).filter(FileModel.filename == "quiz.docx").first()
+        assert rec.id == "new-quiz.docling.json"
+
     def test_reembed_no_debug_dir_returns_400(self, client: TestClient, monkeypatch):
         """Returns 400 if DEBUG_UPLOAD_DIR is not configured."""
         import main as _main
@@ -1857,7 +2037,7 @@ class TestReembed:
         assert r.status_code == 404
 
     def test_reembed_empty_folder_returns_zero(self, client: TestClient, tmp_path, monkeypatch):
-        """Workspace folder exists but has no .md files — returns reembedded=0."""
+        """Workspace folder exists but has no cached files — returns reembedded=0."""
         import main as _main
 
         monkeypatch.setattr(_main, "DEBUG_UPLOAD_DIR", str(tmp_path))

@@ -29,7 +29,7 @@ from config import API_URL, HEADERS, APP_API_KEY
 import requests as _requests
 from config import TEXT_EXTENSIONS, DEBUG_UPLOAD_DIR, MAX_UPLOAD_BYTES
 from database import Base, engine, get_db
-from decling_conversion import convert_file, scrape_website_md
+from decling_conversion import convert_file, docling_filename, scrape_website, DOCLING_SUFFIX
 from models import Workspace, File as FileModel, ScrapeJob
 from schemas import (
     FileResponse,
@@ -203,8 +203,8 @@ async def _process_job_url(url, job, existing_files, queue):
     async with SEM:
         from datetime import datetime
         try:
-            md_result = await asyncio.to_thread(scrape_website_md, url)
-            new_hash = hashlib.sha256(md_result.encode()).hexdigest()
+            doc_json = await asyncio.to_thread(scrape_website, url)
+            new_hash = hashlib.sha256(doc_json.encode()).hexdigest()
 
             existing = existing_files.get(url)
 
@@ -214,8 +214,8 @@ async def _process_job_url(url, job, existing_files, queue):
                 await queue.put({"url": url, "status": "unchanged", "_file_record": existing})
                 return
 
-            filename = _sanitize_url_to_filename(url) + ".md"
-            llm_file = io.StringIO(md_result)
+            filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
+            llm_file = io.StringIO(doc_json)
             llm_file.name = filename
 
             if DEBUG_UPLOAD_DIR:
@@ -232,6 +232,8 @@ async def _process_job_url(url, job, existing_files, queue):
                 await asyncio.to_thread(
                     LLM_remove_document, job.workspace_id, existing.id
                 )
+                if existing.filename != filename:
+                    _delete_debug_file(job.workspace_id, existing.filename)
                 existing.id = file_location
                 existing.filename = filename
                 existing.content_hash = new_hash
@@ -494,9 +496,9 @@ async def processes_file(content, fname, workspace_id, queue):
 
             if file_extension not in TEXT_EXTENSIONS:
                 await queue.put({"file": fname, "status": "converted"})
-                md_result = await asyncio.to_thread(convert_file, content, fname)
-                LLM_File = io.StringIO(md_result)
-                LLM_File.name = Path(fname).with_suffix(".md").name
+                doc_json = await asyncio.to_thread(convert_file, content, fname)
+                LLM_File = io.StringIO(doc_json)
+                LLM_File.name = docling_filename(fname)
             else:
                 LLM_File = io.StringIO(content.decode("utf-8"))
                 LLM_File.name = fname
@@ -610,15 +612,16 @@ async def create_upload_files(
 # Delete endpoints
 # ---------------------------------------------------------------------------
 
-def _debug_filename(original_filename: str) -> str:
-    """Return the filename as it was written to debug_uploads.
+def _debug_filenames(original_filename: str) -> list[str]:
+    """Return the names the file may have been written to debug_uploads under.
 
     Text-extension files are stored under their original name; all other
-    files are converted to Markdown and stored with a .md suffix.
+    files are converted to DoclingDocument JSON and stored with a .docling.json
+    suffix, or with a .md suffix if they were uploaded before the switch to Docling.
     """
     if Path(original_filename).suffix.lower() in TEXT_EXTENSIONS:
-        return original_filename
-    return Path(original_filename).with_suffix(".md").name
+        return [original_filename]
+    return [docling_filename(original_filename), Path(original_filename).with_suffix(".md").name]
 
 
 def _delete_debug_file(workspace_id: str, filename: str) -> None:
@@ -629,11 +632,12 @@ def _delete_debug_file(workspace_id: str, filename: str) -> None:
     """
     if not DEBUG_UPLOAD_DIR:
         return
-    debug_path = Path(DEBUG_UPLOAD_DIR) / workspace_id / _debug_filename(filename)
-    try:
-        debug_path.unlink(missing_ok=True)
-    except Exception as e:
-        print(f"[debug] failed to remove debug file {debug_path}: {e}")
+    for name in _debug_filenames(filename):
+        debug_path = Path(DEBUG_UPLOAD_DIR) / workspace_id / name
+        try:
+            debug_path.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"[debug] failed to remove debug file {debug_path}: {e}")
 
 
 async def _delete_file(file_id, workspace_id):
@@ -971,8 +975,8 @@ async def _process_scraped_url_sse(url, job, existing_files, queue):
         try:
             await queue.put({"url": url, "status": "fetching"})
 
-            md_result = await asyncio.to_thread(scrape_website_md, url)
-            new_hash = hashlib.sha256(md_result.encode()).hexdigest()
+            doc_json = await asyncio.to_thread(scrape_website, url)
+            new_hash = hashlib.sha256(doc_json.encode()).hexdigest()
 
             await queue.put({"url": url, "status": "converted"})
 
@@ -989,8 +993,8 @@ async def _process_scraped_url_sse(url, job, existing_files, queue):
                 })
                 return
 
-            filename = _sanitize_url_to_filename(url) + ".md"
-            llm_file = io.StringIO(md_result)
+            filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
+            llm_file = io.StringIO(doc_json)
             llm_file.name = filename
 
             if DEBUG_UPLOAD_DIR:
@@ -1005,6 +1009,8 @@ async def _process_scraped_url_sse(url, job, existing_files, queue):
             if existing:
                 # Changed — remove old from RAG, update record
                 await asyncio.to_thread(LLM_remove_document, job.workspace_id, existing.id)
+                if existing.filename != filename:
+                    _delete_debug_file(job.workspace_id, existing.filename)
                 existing.id = file_location
                 existing.filename = filename
                 existing.content_hash = new_hash
@@ -1175,7 +1181,7 @@ async def upload_to_workspace(
     """
     Upload one or more files to a workspace.
 
-    Non-text files are converted to Markdown before being sent to the RAG backend.
+    Non-text files are converted to DoclingDocument JSON before being sent to the RAG backend.
     Text files are uploaded as-is. Each file is registered in the local database
     with its original extension preserved.
 
@@ -1202,9 +1208,8 @@ async def upload_to_workspace(
         file_name = f.filename
 
         if file_extension not in TEXT_EXTENSIONS:
-            md_result = convert_file(content, f.filename)
-            LLM_File = io.StringIO(md_result)
-            file_name = Path(f.filename).with_suffix(".md").name
+            LLM_File = io.StringIO(convert_file(content, f.filename))
+            file_name = docling_filename(f.filename)
         else:
             LLM_File = io.StringIO(content.decode("utf-8"))
 
@@ -1385,13 +1390,13 @@ async def debug_rsync(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Reembed: re-upload all cached .md files for a workspace to the RAG backend
+# Reembed: re-upload all cached documents for a workspace to the RAG backend
 # ---------------------------------------------------------------------------
 
 @app.post("/api/v1/workspaces/{workspace_id}/reembed")
 async def reembed_workspace(workspace_id: str, request: Request, db: Session = Depends(get_db)):
     """
-    Re-upload every cached .md file in debug_uploads/{workspace_id}/ back to
+    Re-upload every cached .docling.json (and pre-Docling .md) file in debug_uploads/{workspace_id}/ back to
     the RAG backend. Useful for recovering from a wiped backend without user
     involvement.
 
@@ -1413,8 +1418,8 @@ async def reembed_workspace(workspace_id: str, request: Request, db: Session = D
     if not workspace_dir.exists():
         raise HTTPException(status_code=404, detail=f"No debug folder found for workspace: {workspace_id}")
 
-    md_files = sorted(workspace_dir.glob("*.md"))
-    if not md_files:
+    cached_files = sorted(workspace_dir.glob(f"*{DOCLING_SUFFIX}")) + sorted(workspace_dir.glob("*.md"))
+    if not cached_files:
         return {"reembedded": 0, "failed": []}
 
     # Build a filename → FileModel lookup for fast matching
@@ -1422,35 +1427,36 @@ async def reembed_workspace(workspace_id: str, request: Request, db: Session = D
         f.filename: f
         for f in db.query(FileModel).filter(FileModel.workspace_id == workspace_id).all()
     }
-    # Also index by the .md name (for documents stored with original filename)
-    existing_by_md = {
-        Path(f.filename).with_suffix(".md").name: f
+    # Also index by the debug copy's name (for documents stored with original filename)
+    existing_by_debug_name = {
+        name: f
         for f in existing.values()
+        for name in _debug_filenames(f.filename)
     }
 
     reembedded = 0
     failed = []
 
-    for md_path in md_files:
+    for cached_path in cached_files:
         try:
-            content = md_path.read_text(encoding="utf-8")
+            content = cached_path.read_text(encoding="utf-8")
             llm_file = io.StringIO(content)
-            llm_file.name = md_path.name
+            llm_file.name = cached_path.name
 
             new_doc_id = await asyncio.to_thread(
-                LLM_upload_document, llm_file, md_path.name, workspace_id
+                LLM_upload_document, llm_file, cached_path.name, workspace_id
             )
 
-            # Find matching DB record (exact .md name, or original filename mapped to .md)
-            rec = existing.get(md_path.name) or existing_by_md.get(md_path.name)
+            # Find matching DB record (exact cached name, or original filename mapped to it)
+            rec = existing.get(cached_path.name) or existing_by_debug_name.get(cached_path.name)
 
             if rec:
                 rec.id = new_doc_id
             else:
                 rec = FileModel(
                     id=new_doc_id,
-                    filename=md_path.name,
-                    original_extension=".md",
+                    filename=cached_path.name,
+                    original_extension=".json" if cached_path.name.endswith(DOCLING_SUFFIX) else ".md",
                     workspace_id=workspace_id,
                     category="reembedded",
                 )
@@ -1460,7 +1466,7 @@ async def reembed_workspace(workspace_id: str, request: Request, db: Session = D
             reembedded += 1
 
         except Exception as e:
-            print(f"[reembed] failed for {md_path.name}: {e}")
-            failed.append({"file": md_path.name, "error": str(e)})
+            print(f"[reembed] failed for {cached_path.name}: {e}")
+            failed.append({"file": cached_path.name, "error": str(e)})
 
     return {"reembedded": reembedded, "failed": failed}
