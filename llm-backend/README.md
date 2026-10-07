@@ -16,6 +16,7 @@ A multi-workspace RAG (retrieval-augmented generation) backend for the Universit
 |---|---|
 | `main.py` | HTTP routes |
 | `embedding.py` | File parsing, chunking, S3 Vectors storage and retrieval |
+| `docling_chunks.py` | Section-aware chunking and citation metadata for DoclingDocument uploads |
 | `query.py` | RAG pipeline, streaming, chat sessions |
 | `db.py` | Settings and document records in S3 |
 | `rewriter.py`, `searxng.py`, `prompts.py` | Query rewriting, web search, default prompts |
@@ -97,3 +98,14 @@ curl -X POST localhost:3001/api/workspace/<slug>/query -H "$H" -H "Content-Type:
 ```
 
 The embedding model, chunk size and chunk overlap are fixed once a workspace is created.
+
+## DoclingDocument uploads and citations
+
+The upload service converts files and web pages with Docling and sends them to `/embed` as DoclingDocument JSON named `<name>.docling.json`. These are chunked differently from other files:
+
+- Docling's `HybridChunker` splits at section boundaries (up to 512 tokens) and prefixes each chunk with its heading path. Chunks under 128 tokens are merged into a neighbour. Tokens are counted with `DOCLING_TOKENIZER` (default `Qwen/Qwen3-Embedding-8B`, matching qwen3-embed-8b), which the Docker image downloads at build time. The workspace's chunk size and overlap apply only to other files.
+- Each vector stores `title`, `uri` (the page's link), `source` (original file name), `source_type` and `headings`.
+
+When answering, document passages are numbered and sent with their `Title:` and `Source:` lines, and the model cites them as `[1]`, `[2]`. Each entry in `sources.documents` has `n`, `cited`, `title`, `uri` and `headings`, so clients list the cited passages under the answer themselves. The model does not write a sources list.
+
+Indexes created before this change only declare `text` and `filename` non-filterable, so the citation fields count toward S3 Vectors' 2 KB filterable-metadata limit there (titles and links are capped to fit). Recreate a workspace to get the new index layout.

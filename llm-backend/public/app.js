@@ -877,6 +877,19 @@ queryClearBtn.addEventListener('click', () => {
   querySubmitBtn.textContent = 'Ask';
 });
 
+// "Title › Section" for a document source. Docling heading paths usually start
+// with the page title, so headings equal to the title are skipped.
+function sourceLabel(s) {
+  const title = s.title || s.filename || 'Unknown';
+  const section = (s.headings || []).filter(h => !title.startsWith(h)).join(' › ');
+  return section ? `${title} › ${section}` : title;
+}
+
+// Only http(s) links are rendered as anchors.
+function safeHttpUrl(url) {
+  return /^https?:\/\//i.test(url || '') ? url : '';
+}
+
 function renderSources(sources) {
   querySources.innerHTML = '';
 
@@ -896,14 +909,23 @@ function renderSources(sources) {
     header.textContent = 'Documents';
     querySources.appendChild(header);
 
-    docs.forEach(s => {
+    // Passages the answer cited ([n]) come first; the rest are shown muted.
+    // Sources without a `cited` flag (older responses) are shown as before.
+    const ordered = [...docs].sort((a, b) => (b.cited === true) - (a.cited === true));
+    ordered.forEach(s => {
       const div = document.createElement('div');
-      div.className = 'source-item';
+      div.className = 'source-item' + (s.cited === false ? ' source-uncited' : '');
+      const label = escHtml(sourceLabel(s));
+      const url = safeHttpUrl(s.uri);
       div.innerHTML = `
         <div class="source-meta">
-          <span>${escHtml(s.filename || 'Unknown')}</span>
+          ${s.n ? `<span class="source-number">[${s.n}]</span>` : ''}
+          ${url
+            ? `<a href="${escHtml(url)}" target="_blank" rel="noopener noreferrer" class="web-source-title">${label}</a>`
+            : `<span>${label}</span>`}
           <span>Score: ${typeof s.score === 'number' ? s.score.toFixed(3) : '—'}</span>
         </div>
+        ${url ? `<div class="source-url">${escHtml(url)}</div>` : ''}
         <div class="source-text">${escHtml(s.text || '')}</div>
       `;
       querySources.appendChild(div);
@@ -917,12 +939,19 @@ function renderSources(sources) {
     header.textContent = 'Web Results';
     querySources.appendChild(header);
 
-    web.forEach(r => {
+    // Same ordering as documents: cited results first, the rest muted
+    const orderedWeb = [...web].sort((a, b) => (b.cited === true) - (a.cited === true));
+    orderedWeb.forEach(r => {
       const div = document.createElement('div');
-      div.className = 'source-item web-source-item';
+      div.className = 'source-item web-source-item' + (r.cited === false ? ' source-uncited' : '');
+      const url = safeHttpUrl(r.url);
+      const title = escHtml(r.title || r.url || 'Web result');
       div.innerHTML = `
         <div class="source-meta">
-          <a href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer" class="web-source-title">${escHtml(r.title || r.url || 'Web result')}</a>
+          ${r.n ? `<span class="source-number">[${r.n}]</span>` : ''}
+          ${url
+            ? `<a href="${escHtml(url)}" target="_blank" rel="noopener noreferrer" class="web-source-title">${title}</a>`
+            : `<span>${title}</span>`}
         </div>
         <div class="source-url">${escHtml(r.url || '')}</div>
         <div class="source-text">${escHtml(r.snippet || '')}</div>
@@ -1053,7 +1082,7 @@ function appendLogTurn(body, turn) {
   if (docs.length) {
     const docsDiv = document.createElement('div');
     const chips = docs.map(d =>
-      `<span class="log-source-chip">${escHtml(d.filename || 'Unknown')}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
+      `<span class="log-source-chip${d.cited === false ? ' source-uncited' : ''}">${d.n ? `[${d.n}] ` : ''}${escHtml(sourceLabel(d))}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
     ).join('');
     docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
       <div class="log-source-chips">${chips}</div>`;
@@ -1065,7 +1094,7 @@ function appendLogTurn(body, turn) {
   if (web.length) {
     const webDiv = document.createElement('div');
     const links = web.map(r =>
-      `<a class="log-web-link" href="${escHtml(r.url || '')}" target="_blank" rel="noopener noreferrer">${escHtml(r.title || r.url || 'Web result')}</a>`
+      `<a class="log-web-link${r.cited === false ? ' source-uncited' : ''}" href="${escHtml(safeHttpUrl(r.url))}" target="_blank" rel="noopener noreferrer">${r.n ? `[${r.n}] ` : ''}${escHtml(r.title || r.url || 'Web result')}</a>`
     ).join('');
     webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
       <div class="log-web-links">${links}</div>`;

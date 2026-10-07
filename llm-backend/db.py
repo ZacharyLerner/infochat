@@ -10,14 +10,15 @@ objects in S3 (config.S3_STATE_BUCKET) so the backend container is stateless:
     workspaces/<slug>/logs/<day>/...  query and chat logs (see "Query logs")
 
 Read-modify-write updates use S3 conditional writes (If-Match on the ETag,
-retried on conflict), so concurrent requests and multiple containers never
-overwrite each other's changes.
+retried on conflict after a random, growing wait), so concurrent requests and
+multiple containers never overwrite each other's changes.
 """
 
 import json
 import random
 import re
 import string
+import time
 import uuid
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -57,7 +58,12 @@ _SETTINGS_FIELDS = set(SETTINGS_DEFAULTS)
 # chunk_size, chunk_overlap and embed_model are locked after creation
 _WORKSPACE_MUTABLE_FIELDS = {"name"} | _SETTINGS_FIELDS - {"chunk_size", "chunk_overlap", "embed_model"}
 
-_MAX_RETRIES = 5
+# Conditional-write retries. A batch upload sends ~10 embeds at once and each
+# appends to the same docs.json, so losers wait a random time that doubles per
+# attempt ("full jitter") instead of retrying in lockstep and colliding again.
+_MAX_RETRIES = 10
+_RETRY_BASE_SECONDS = 0.05
+_RETRY_MAX_SECONDS = 2.0
 
 _client = None
 
@@ -116,7 +122,9 @@ def _update_json(key: str, fn: Callable, default=None, create: bool = True):
     If the object doesn't exist, `default` is used as current when `create`
     is True; otherwise None is returned and nothing is written.
     """
-    for _ in range(_MAX_RETRIES):
+    for attempt in range(_MAX_RETRIES):
+        if attempt:
+            time.sleep(random.uniform(0, min(_RETRY_MAX_SECONDS, _RETRY_BASE_SECONDS * 2 ** attempt)))
         current, etag = _get_json(key)
         if current is None:
             if not create:

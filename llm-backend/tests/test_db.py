@@ -308,6 +308,47 @@ class TestDocRecords:
 
         assert [d["doc_id"] for d in db.list_docs(ws["slug"])] == ["a", "other-writer", "b"]
 
+    @staticmethod
+    def _conflict():
+        from botocore.exceptions import ClientError
+        return ClientError({"Error": {"Code": "PreconditionFailed", "Message": "x"}}, "PutObject")
+
+    def test_conflicts_wait_with_growing_random_backoff(self):
+        """Losers of a write race wait before retrying, and the cap on the wait doubles."""
+        ws = db.create_workspace(name="Docs")
+        real_put = db._put_json
+        fails = {"left": 4}
+
+        def flaky_put(key, data, **kwargs):
+            if fails["left"]:
+                fails["left"] -= 1
+                raise self._conflict()
+            return real_put(key, data, **kwargs)
+
+        with (
+            patch.object(db, "_put_json", side_effect=flaky_put),
+            patch.object(db.time, "sleep") as sleep,
+            patch.object(db.random, "uniform", side_effect=lambda lo, hi: hi) as uniform,
+        ):
+            db.add_doc(ws["slug"], self._doc("a"))
+
+        assert [d["doc_id"] for d in db.list_docs(ws["slug"])] == ["a"]
+        # No wait before the first attempt; one per retry
+        assert sleep.call_count == 4
+        caps = [c.args[1] for c in uniform.call_args_list]
+        assert caps == sorted(caps) and caps[-1] > caps[0]
+        assert all(c.args[0] == 0 for c in uniform.call_args_list)
+
+    def test_gives_up_after_max_retries(self):
+        ws = db.create_workspace(name="Docs")
+        with (
+            patch.object(db, "_put_json", side_effect=self._conflict()) as put,
+            patch.object(db.time, "sleep"),
+        ):
+            with pytest.raises(RuntimeError, match="Too many concurrent updates"):
+                db.add_doc(ws["slug"], self._doc("a"))
+        assert put.call_count == db._MAX_RETRIES
+
 
 # ---------------------------------------------------------------------------
 # Query logs

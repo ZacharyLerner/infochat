@@ -680,6 +680,16 @@ td code {
   line-height: 1.5;
 }
 
+.source-number {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+/* Retrieved but not cited in the answer */
+.source-uncited {
+  opacity: 0.55;
+}
+
 /* =====================================================
    MODAL
    ===================================================== */

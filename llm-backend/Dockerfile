@@ -17,6 +17,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the chunking tokenizer into the image so the first DoclingDocument
+# upload doesn't download it (must match DOCLING_TOKENIZER in config.py / .env)
+ARG DOCLING_TOKENIZER=Qwen/Qwen3-Embedding-8B
+RUN python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('${DOCLING_TOKENIZER}')"
+
 # Copy application source
 COPY . .
 

@@ -6,6 +6,10 @@ uvicorn[standard]
 llama-index-core
 llama-index-llms-litellm
 
+# DoclingDocument uploads: structure-aware chunking (HybridChunker) and the
+# Hugging Face tokenizer that sizes chunks (no torch needed)
+docling-core[chunking]
+
 # Vector store (AWS S3 Vectors)
 boto3
 

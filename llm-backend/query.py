@@ -19,6 +19,7 @@ retrieval when enabled. Results are merged into a single labeled context block.
 import asyncio
 import datetime as _dt
 import json
+import re
 import time as _time
 import uuid as _uuid
 from typing import AsyncGenerator
@@ -29,7 +30,7 @@ from typing import AsyncGenerator
 # for 1750 tokens, leaving headroom).
 _MAX_EMBED_CHARS = 6000
 
-from prompts import DEFAULT_SYSTEM_PROMPT_RAG, DEFAULT_SYSTEM_PROMPT_WEB  # noqa: E402
+from prompts import CITATION_INSTRUCTIONS, DEFAULT_SYSTEM_PROMPT_RAG, DEFAULT_SYSTEM_PROMPT_WEB  # noqa: E402
 
 
 def _safe_embed_query(text: str) -> str:
@@ -123,40 +124,102 @@ def _build_session_state(workspace: dict, chat_history: list[dict] | None = None
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _passage_title(metadata: dict) -> str:
+    return metadata.get("title") or metadata.get("filename") or "Untitled"
+
+
+def _passage_source(metadata: dict) -> str:
+    return metadata.get("uri") or metadata.get("source") or metadata.get("filename") or ""
+
+
 def _build_merged_context(nodes: list, web_results: list[dict]) -> str:
     """Build a merged context block from vector nodes and/or web results.
 
     Sections present only when non-empty:
-      --- Document Context ---      (vector chunks)
-      --- Web Search Results ---    (SearXNG results)
+      --- Document Context ---      (numbered vector chunks with Title/Source)
+      --- Web Search Results ---    (numbered SearXNG results with Title/Source)
+
+    Documents and web results share one numbering — documents are [1]..[k],
+    web results continue from [k+1] — so the answer cites either the same way
+    (see CITATION_INSTRUCTIONS) and the app can list exactly the ones it used.
+    The Source line is the page's link when there is one, which is how the
+    model can answer link requests.
 
     Returns an empty string when both are empty.
     """
     parts = []
 
     if nodes:
-        doc_text = "\n\n".join(n.node.get_content() for n in nodes)
+        doc_text = "\n\n".join(
+            f"[{i}]\n"
+            f"Title: {_passage_title(n.node.metadata)}\n"
+            f"Source: {_passage_source(n.node.metadata)}\n"
+            f"{n.node.get_content()}"
+            for i, n in enumerate(nodes, 1)
+        )
         parts.append(f"--- Document Context ---\n{doc_text}")
 
     if web_results:
-        lines = [
-            "--- Web Search Results ---",
-            "The following live web results were retrieved for this query.",
-            "When they are relevant, you MUST cite the source URL in your answer.",
-        ]
-        for i, r in enumerate(web_results, 1):
-            title   = r.get("title", "")
-            url     = r.get("url", "")
-            snippet = r.get("snippet", "")
+        lines = ["--- Web Search Results ---"]
+        for i, r in enumerate(web_results, len(nodes) + 1):
             lines.append(
-                f"[Web Result {i}]\n"
-                f"  Title:   {title}\n"
-                f"  Source:  {url}\n"
-                f"  Excerpt: {snippet}"
+                f"[{i}]\n"
+                f"Title: {r.get('title', '')}\n"
+                f"Source: {r.get('url', '')}\n"
+                f"{r.get('snippet', '')}"
             )
         parts.append("\n\n".join(lines))
 
     return "\n\n".join(parts)
+
+
+def _cited_numbers(answer: str, count: int) -> set[int]:
+    """Passage numbers cited as [n] in the answer (ignoring out-of-range ones)."""
+    return {int(n) for n in re.findall(r"\[(\d+)\]", answer) if 1 <= int(n) <= count}
+
+
+def _doc_sources(nodes: list, answer: str) -> list[dict]:
+    """Sources payload for the retrieved passages, in prompt order.
+
+    `n` is the passage's citation number and `cited` says whether the answer
+    cited it, so clients can list exactly the cited passages (with title,
+    section and link) under the answer.
+    """
+    cited = _cited_numbers(answer, len(nodes))
+    sources = []
+    for i, node in enumerate(nodes, 1):
+        metadata = node.node.metadata
+        sources.append({
+            "n": i,
+            "cited": i in cited,
+            "score": node.score,
+            "filename": metadata.get("filename"),
+            "title": _passage_title(metadata),
+            "uri": metadata.get("uri") or "",
+            "headings": list(metadata.get("headings") or []),
+            "source_type": metadata.get("source_type") or "",
+            "text": node.node.get_content()[:200],
+        })
+    return sources
+
+
+def _web_sources(nodes: list, web_results: list[dict], answer: str) -> list[dict]:
+    """Web results with their citation number (continuing after the documents)
+    and whether the answer cited them."""
+    cited = _cited_numbers(answer, len(nodes) + len(web_results))
+    return [
+        {**r, "n": i, "cited": i in cited}
+        for i, r in enumerate(web_results, len(nodes) + 1)
+    ]
+
+
+def _sources_payload(nodes: list, web_results: list[dict], answer: str) -> dict:
+    return {"documents": _doc_sources(nodes, answer), "web": _web_sources(nodes, web_results, answer)}
+
+
+def _context_instructions(nodes: list, web_results: list[dict]) -> str:
+    """Instructions appended after the context block in the user prompt."""
+    return " " + CITATION_INSTRUCTIONS if nodes or web_results else ""
 
 
 async def _rewrite_if_enabled(
@@ -287,17 +350,7 @@ async def stream_chat_session(
             _web_task(),
         )
 
-        # ── 5. Build sources payload ──────────────────────────────────────────
-        doc_sources = [
-            {
-                "score": node.score,
-                "filename": node.node.metadata.get("filename"),
-                "text": node.node.get_content()[:200],
-            }
-            for node in nodes
-        ]
-
-        # ── 6. Build the context block and prompt ─────────────────────────────
+        # ── 5. Build the context block and prompt ─────────────────────────────
         system_prompt = (
             workspace.get("system_prompt")
             or (DEFAULT_SYSTEM_PROMPT_WEB if web_enabled else DEFAULT_SYSTEM_PROMPT_RAG)
@@ -307,16 +360,13 @@ async def stream_chat_session(
         context_str = _build_merged_context(nodes, web_results)
 
         if context_str:
-            web_note = (
-                " When citing web results, include the source URL."
-                if web_enabled and web_results else ""
-            )
+            citation_note = _context_instructions(nodes, web_results)
             user_content = (
                 f"Context information is below.\n"
                 f"---------------------\n"
                 f"{context_str}\n"
                 f"---------------------\n"
-                f"Given the context information above and the conversation history, answer the query.{web_note}\n"
+                f"Given the context information above and the conversation history, answer the query.{citation_note}\n"
                 f"Query: {message}\n"
                 f"Answer: "
             )
@@ -338,7 +388,7 @@ async def stream_chat_session(
         messages.extend(prior_messages)
         messages.append(ChatMessage(role=MessageRole.USER, content=user_content))
 
-        # ── 7. Stream directly from the LLM ──────────────────────────────────
+        # ── 6. Stream directly from the LLM ──────────────────────────────────
         llm = build_llm(
             workspace["llm_model"],
             workspace["api_key"],
@@ -362,17 +412,17 @@ async def stream_chat_session(
             yield "event: done\ndata: [DONE]\n\n"
             return
 
-        # ── 8. Update memory with this turn ──────────────────────────────────
+        # ── 7. Update memory with this turn ──────────────────────────────────
         # Store the raw user message (not the context-augmented one) so the
         # conversation history reads naturally in subsequent turns.
         memory.put(ChatMessage(role=MessageRole.USER, content=message))
         memory.put(ChatMessage(role=MessageRole.ASSISTANT, content=full_response.strip()))
 
-        sources_payload = {"documents": doc_sources, "web": web_results}
+        sources_payload = _sources_payload(nodes, web_results, full_response)
         yield f"event: sources\ndata: {json.dumps(sources_payload)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
 
-        # ── 9. Emit log event (intercepted by main.py, never reaches browser) ─
+        # ── 8. Emit log event (intercepted by main.py, never reaches browser) ─
         log_entry = {
             "id": str(_uuid.uuid4()),
             "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
@@ -443,16 +493,13 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
         workspace.get("system_prompt")
         or (DEFAULT_SYSTEM_PROMPT_WEB if web_enabled else DEFAULT_SYSTEM_PROMPT_RAG)
     )
-    web_note = (
-        " When citing web results, include the source URL."
-        if web_enabled and web_results else ""
-    )
+    citation_note = _context_instructions(nodes, web_results)
     user_prompt = (
         f"Context information is below.\n"
         f"---------------------\n"
         f"{context_str}\n"
         f"---------------------\n"
-        f"Given the context information above and not prior knowledge, answer the query.{web_note}\n"
+        f"Given the context information above and not prior knowledge, answer the query.{citation_note}\n"
         f"Query: {question}\n"
         f"Answer: "
     )
@@ -473,18 +520,9 @@ async def _async_query_workspace(workspace: dict, question: str) -> dict:
     response = await asyncio.to_thread(llm.chat, messages)
     answer = (response.message.content or "").strip()
 
-    doc_sources = [
-        {
-            "score": node.score,
-            "filename": node.node.metadata.get("filename"),
-            "text": node.node.get_content()[:200],
-        }
-        for node in nodes
-    ]
-
     return {
         "answer": answer,
-        "sources": {"documents": doc_sources, "web": web_results},
+        "sources": _sources_payload(nodes, web_results, answer),
         "rewritten_query": rewritten,
     }
 
@@ -550,16 +588,13 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             workspace["system_prompt"]
             or (DEFAULT_SYSTEM_PROMPT_WEB if web_enabled else DEFAULT_SYSTEM_PROMPT_RAG)
         )
-        web_note = (
-            " When citing web results, include the source URL."
-            if web_enabled and web_results else ""
-        )
+        citation_note = _context_instructions(nodes, web_results)
         user_prompt = (
             f"Context information is below.\n"
             f"---------------------\n"
             f"{context_str}\n"
             f"---------------------\n"
-            f"Given the context information above and not prior knowledge, answer the query.{web_note}\n"
+            f"Given the context information above and not prior knowledge, answer the query.{citation_note}\n"
             f"Query: {question}\n"
             f"Answer: "
         )
@@ -595,15 +630,7 @@ async def stream_query_workspace(workspace: dict, question: str, prompt_suffix: 
             return
 
         # ── 6. Emit sources ───────────────────────────────────────────────────
-        doc_sources = [
-            {
-                "score": node.score,
-                "filename": node.node.metadata.get("filename"),
-                "text": node.node.get_content()[:200],
-            }
-            for node in nodes
-        ]
-        sources_payload = {"documents": doc_sources, "web": web_results}
+        sources_payload = _sources_payload(nodes, web_results, full_answer)
         yield f"event: sources\ndata: {json.dumps(sources_payload)}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
 

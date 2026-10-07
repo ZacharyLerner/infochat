@@ -33,9 +33,12 @@ from pydantic import BaseModel, Field
 
 import config
 import db
+import docling_chunks
 import embedding
 import manager
 import query
+
+_log = _logging.getLogger(__name__)
 
 # --- Lifespan ----------------------------------------------------------------
 def _ensure_indexes() -> None:
@@ -159,7 +162,7 @@ class CreateWorkspace(BaseModel):
     system_prompt: Optional[str] = Field(None, description="System prompt prepended to every query.")
     top_n: Optional[int] = Field(None, description="Number of most-similar chunks to retrieve and pass to the LLM.")
     similarity_threshold: Optional[float] = Field(None, description="Minimum cosine similarity score (0–1) a chunk must meet to be included.")
-    chunk_size: Optional[int] = Field(None, description="Token size of each chunk. Locked after creation — changing this after files are embedded would cause inconsistent retrieval.")
+    chunk_size: Optional[int] = Field(None, description="Token size of each chunk for plain files (DoclingDocument uploads are chunked by section, up to 512 tokens). Locked after creation — changing this after files are embedded would cause inconsistent retrieval.")
     chunk_overlap: Optional[int] = Field(None, description="Token overlap between consecutive chunks. Locked after creation for the same reason as chunk_size.")
     embed_model: Optional[str] = Field(None, description="Embedding model for this workspace. Locked after creation — changing it would cause vector dimension mismatches. Falls back to the global default if blank. Use 'direct-openai/<model>' to bypass the gateway.")
     embed_api_key: Optional[str] = Field(None, description="API key for the embedding model. Only needed when using a direct-openai/ embedding model that requires its own key separate from the LLM gateway key.")
@@ -348,7 +351,7 @@ def _record_doc(slug: str, doc_id: str, filename: str, chunks: int) -> None:
 
 
 @api_router.post("/workspace/{slug}/embed", summary="Upload and embed a file")
-async def embed_file(slug: str, file: UploadFile = File(..., description="File to parse and embed. Supported types include PDF, DOCX, and plain text.")):
+async def embed_file(slug: str, file: UploadFile = File(..., description="File to parse and embed. Supported types include PDF, DOCX, plain text, and DoclingDocument JSON named *.docling.json (chunked by section, with title and link kept for citations).")):
     import asyncio, io
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
@@ -362,14 +365,30 @@ async def embed_file(slug: str, file: UploadFile = File(..., description="File t
     await file.close()
 
     filename = file.filename
-    chunks, doc_id = await asyncio.to_thread(
-        embedding.embed_workspace_file, slug, filename, io.BytesIO(file_bytes)
-    )
+    try:
+        chunks, doc_id = await asyncio.to_thread(
+            embedding.embed_workspace_file, slug, filename, io.BytesIO(file_bytes)
+        )
+    except docling_chunks.InvalidDocument as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     if chunks == 0:
         raise HTTPException(status_code=422, detail="No text could be extracted")
 
-    await asyncio.to_thread(_record_doc, slug, doc_id, filename, chunks)
+    try:
+        await asyncio.to_thread(_record_doc, slug, doc_id, filename, chunks)
+    except Exception as exc:
+        # Without a docs.json record the vectors could never be listed or
+        # deleted, so remove them and let the caller retry the upload.
+        _log.error("recording %s (%s) in '%s' failed: %s", filename, doc_id, slug, exc)
+        try:
+            await asyncio.to_thread(embedding.delete_workspace_file, slug, doc_id, chunks)
+        except Exception as cleanup_exc:
+            _log.error("removing unrecorded vectors %s in '%s' failed: %s", doc_id, slug, cleanup_exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not record '{filename}'; its embeddings were removed. Retry the upload.",
+        )
 
     return {"status": "ok", "slug": slug, "filename": filename,
             "doc_id": doc_id, "chunks_embedded": chunks}

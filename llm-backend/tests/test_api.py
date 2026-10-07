@@ -301,6 +301,38 @@ class TestEmbedEndpoints:
         assert docs[0]["filename"] == "doc.txt"
         assert docs[0]["doc_id"] == self.FAKE_DOC_ID
 
+    def test_embed_record_failure_removes_vectors(self, test_client, workspace):
+        """If docs.json can't be updated, the new vectors are deleted and a retryable 503 is returned."""
+        slug = workspace["slug"]
+        with (
+            self._mock_embed(),
+            patch("main.db.add_doc", side_effect=RuntimeError("Too many concurrent updates")),
+            patch("main.embedding.delete_workspace_file", return_value=5) as delete,
+        ):
+            resp = test_client.post(
+                f"/api/workspace/{slug}/embed",
+                files={"file": ("busy.txt", io.BytesIO(b"content"), "text/plain")},
+                headers=AUTH_HEADERS,
+            )
+        assert resp.status_code == 503
+        assert "Retry" in resp.json()["detail"]
+        delete.assert_called_once_with(slug, self.FAKE_DOC_ID, 5)
+        assert test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json() == []
+
+    def test_embed_record_failure_still_503_if_cleanup_fails(self, test_client, workspace):
+        slug = workspace["slug"]
+        with (
+            self._mock_embed(),
+            patch("main.db.add_doc", side_effect=RuntimeError("busy")),
+            patch("main.embedding.delete_workspace_file", side_effect=RuntimeError("s3 down")),
+        ):
+            resp = test_client.post(
+                f"/api/workspace/{slug}/embed",
+                files={"file": ("busy.txt", io.BytesIO(b"content"), "text/plain")},
+                headers=AUTH_HEADERS,
+            )
+        assert resp.status_code == 503
+
     def test_delete_embed_success(self, test_client, workspace):
         slug = workspace["slug"]
         # First embed a file to get a valid doc_id in docs.json

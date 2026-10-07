@@ -235,7 +235,7 @@ class TestEmbedWorkspaceFile:
         vectors = s3v.put_vectors.call_args.kwargs["vectors"]
         assert [v["key"] for v in vectors] == [f"{doc_id}#0", f"{doc_id}#1", f"{doc_id}#2"]
         assert vectors[0]["data"] == {"float32": [0.1, 0.2]}
-        assert vectors[0]["metadata"] == {"text": "a", "filename": "report.pdf", "doc_id": doc_id}
+        assert vectors[0]["metadata"] == {"text": "a", "filename": "report.pdf", "doc_id": doc_id, "chunk_index": 0}
 
     def test_blank_chunks_skipped(self, s3v):
         (chunks, _), _ = self._embed(_ws(), ["a", "   ", "b"])
@@ -290,3 +290,125 @@ class TestRetrieve:
     def test_missing_index_returns_empty(self, s3v):
         s3v.query_vectors.side_effect = _NotFound()
         assert self._retrieve(_ws()) == []
+
+
+# ---------------------------------------------------------------------------
+# DoclingDocument uploads (.docling.json)
+# ---------------------------------------------------------------------------
+
+def _whitespace_tokenizer(max_tokens):
+    """Offline stand-in for the Qwen tokenizer: one token per word."""
+    from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
+
+    class _Words(BaseTokenizer):
+        max_tokens: int
+
+        def count_tokens(self, text: str) -> int:
+            return len(text.split())
+
+        def get_max_tokens(self) -> int:
+            return self.max_tokens
+
+        def get_tokenizer(self):
+            return lambda text: len(text.split())
+
+    return _Words(max_tokens=max_tokens)
+
+
+@pytest.fixture()
+def docling_chunker():
+    """Use a HybridChunker with a word-count tokenizer instead of downloading one."""
+    import docling_chunks
+    from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
+    chunker = HybridChunker(tokenizer=_whitespace_tokenizer(docling_chunks.MAX_TOKENS))
+    with patch("docling_chunks._chunker", chunker):
+        yield chunker
+
+
+def _wifi_doc(uri="https://sites.google.com/uri.edu/wiki/wi-fi", filename="URI ITSD Internal - Wi-Fi.html"):
+    from docling_core.types.doc import DocItemLabel, DoclingDocument
+    from docling_core.types.doc.document import DocumentOrigin
+    doc = DoclingDocument(name="URI ITSD Internal - Wi-Fi")
+    doc.origin = DocumentOrigin(filename=filename, mimetype="text/html", binary_hash=1, uri=uri)
+    doc.add_text(label=DocItemLabel.TITLE, text="URI ITSD Internal - Wi-Fi")
+    doc.add_heading(text="Wi-Fi", level=1)
+    doc.add_text(label=DocItemLabel.TEXT, text="Short intro.")  # tiny section: merged into a neighbour
+    doc.add_heading(text="Gaming Devices", level=2)
+    doc.add_text(label=DocItemLabel.TEXT, text=" ".join(["Register the Xbox MAC address at rhodywifi."] * 40))
+    doc.add_heading(text="Eduroam", level=2)
+    doc.add_text(label=DocItemLabel.TEXT, text=" ".join(["Students connect to eduroam with SSO credentials."] * 40))
+    return doc
+
+
+class TestEmbedDoclingFile:
+    def _embed(self, doc_or_bytes, filename="wifi.docling.json"):
+        import db
+        raw = doc_or_bytes if isinstance(doc_or_bytes, bytes) else doc_or_bytes.model_dump_json().encode()
+        with (
+            patch.object(db, "get_workspace", return_value=_ws()),
+            patch("embedding.SimpleDirectoryReader") as mock_reader,
+            patch("embedding.litellm.embedding",
+                  side_effect=lambda input, **kw: _embedding_response([[0.1]] * len(input))),
+        ):
+            result = embedding.embed_workspace_file("test-ws", filename, io.BytesIO(raw))
+        mock_reader.assert_not_called()
+        return result
+
+    def test_chunks_carry_citation_metadata(self, s3v, docling_chunker):
+        (count, doc_id) = self._embed(_wifi_doc())
+        metas = [v["metadata"] for c in s3v.put_vectors.call_args_list for v in c.kwargs["vectors"]]
+        assert count == len(metas) == 2
+        for i, m in enumerate(metas):
+            assert m["title"] == "URI ITSD Internal - Wi-Fi"
+            assert m["uri"] == "https://sites.google.com/uri.edu/wiki/wi-fi"
+            assert m["source"] == "URI ITSD Internal - Wi-Fi.html"
+            assert m["source_type"] == "html"
+            assert m["filename"] == "wifi.docling.json"
+            assert (m["doc_id"], m["chunk_index"]) == (doc_id, i)
+
+        gaming, eduroam = metas
+        # Embedded text is prefixed with the heading path (Docling puts the title first)
+        assert "URI ITSD Internal - Wi-Fi\nWi-Fi\nGaming Devices\nRegister the Xbox" in gaming["text"]
+        # The tiny intro section was merged; the merged chunk keeps its larger part's headings
+        assert "Short intro." in gaming["text"]
+        assert gaming["headings"] == ["URI ITSD Internal - Wi-Fi", "Wi-Fi", "Gaming Devices"]
+        assert eduroam["headings"] == ["URI ITSD Internal - Wi-Fi", "Wi-Fi", "Eduroam"]
+        assert "Xbox" not in eduroam["text"]
+
+    def test_document_without_uri_or_title(self, s3v, docling_chunker):
+        from docling_core.types.doc import DocItemLabel, DoclingDocument
+        from docling_core.types.doc.document import DocumentOrigin
+        doc = DoclingDocument(name="Quiz - Answers")
+        doc.origin = DocumentOrigin(filename="Quiz - Answers.docx", binary_hash=1,
+                                    mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        doc.add_text(label=DocItemLabel.TEXT, text="Question 1: reset a password through the SSO portal.")
+        self._embed(doc, filename="Quiz - Answers.docling.json")
+        meta = s3v.put_vectors.call_args.kwargs["vectors"][0]["metadata"]
+        assert meta["title"] == "Quiz - Answers"
+        assert meta["uri"] == ""
+        assert meta["source_type"] == "docx"
+        assert "headings" not in meta
+
+    def test_overlong_uri_is_dropped(self, s3v, docling_chunker):
+        self._embed(_wifi_doc(uri="https://example.com/?q=" + "x" * 2000))
+        assert s3v.put_vectors.call_args.kwargs["vectors"][0]["metadata"]["uri"] == ""
+
+    def test_invalid_json_raises_invalid_document(self, s3v):
+        import docling_chunks
+        with pytest.raises(docling_chunks.InvalidDocument):
+            self._embed(b'{"not": "a docling document"}')
+        with pytest.raises(docling_chunks.InvalidDocument):
+            self._embed(b"not json at all")
+        s3v.put_vectors.assert_not_called()
+
+    def test_suffix_detection(self):
+        import docling_chunks
+        assert docling_chunks.is_docling_file("Report.DOCLING.JSON")
+        assert not docling_chunks.is_docling_file("data.json")
+
+    def test_new_indexes_keep_citation_fields_non_filterable(self, s3v):
+        with patch("embedding.litellm.embedding", return_value=_embedding_response([[0.1]])):
+            embedding.create_workspace_index(_ws())
+        keys = s3v.create_index.call_args.kwargs["metadataConfiguration"]["nonFilterableMetadataKeys"]
+        assert {"text", "filename", "title", "uri", "source", "headings"} <= set(keys)
+        assert "source_type" not in keys

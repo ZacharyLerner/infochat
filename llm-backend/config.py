@@ -19,6 +19,10 @@ API_BASE = os.getenv("OPENAI_API_BASE", "https://llmgw.its.uri.edu/v1")
 S3_VECTOR_BUCKET = os.getenv("S3_VECTOR_BUCKET", "infochat-vectors")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
+# Hugging Face tokenizer used to size DoclingDocument chunks. It should match
+# the embedding model so chunk limits are counted in the tokens it sees.
+DOCLING_TOKENIZER = os.getenv("DOCLING_TOKENIZER", "Qwen/Qwen3-Embedding-8B")
+
 # S3 bucket (regular, not vector) holding global settings, workspace settings
 # and document records as JSON — see db.py.
 S3_STATE_BUCKET = os.getenv("S3_STATE_BUCKET", "zl-workspace-storage-727646498592-us-east-1-an")

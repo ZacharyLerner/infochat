@@ -111,8 +111,15 @@ class TestBuildMergedContext:
             {"title": "B", "url": "https://b.com", "snippet": "bb"},
         ]
         result = query._build_merged_context([], web)
-        assert "[Web Result 1]" in result
-        assert "[Web Result 2]" in result
+        assert "[1]\nTitle: A\nSource: https://a.com\naa" in result
+        assert "[2]\nTitle: B\nSource: https://b.com\nbb" in result
+
+    def test_web_numbering_continues_after_documents(self):
+        nodes = [_make_mock_node(content="doc one"), _make_mock_node(content="doc two")]
+        web = [{"title": "W", "url": "https://w.com", "snippet": "web text"}]
+        result = query._build_merged_context(nodes, web)
+        assert "[1]\n" in result and "[2]\n" in result
+        assert "[3]\nTitle: W\nSource: https://w.com\nweb text" in result
 
     def test_multiple_nodes_all_included(self):
         nodes = [
@@ -127,6 +134,79 @@ class TestBuildMergedContext:
 # ---------------------------------------------------------------------------
 # _rewrite_if_enabled
 # ---------------------------------------------------------------------------
+
+class TestNumberedPassages:
+    @staticmethod
+    def _node(metadata, content="chunk text", score=0.9):
+        node = MagicMock()
+        node.score = score
+        node.node.metadata = metadata
+        node.node.get_content.return_value = content
+        return node
+
+    def test_passages_numbered_with_title_and_source(self):
+        nodes = [
+            self._node({"title": "URI ITSD Internal - Wi-Fi", "uri": "https://example.edu/wifi",
+                        "filename": "wifi.docling.json"}, "Gaming devices text"),
+            self._node({"filename": "notes.txt"}, "plain text"),
+        ]
+        ctx = query._build_merged_context(nodes, [])
+        assert "[1]\nTitle: URI ITSD Internal - Wi-Fi\nSource: https://example.edu/wifi\nGaming devices text" in ctx
+        # Plain uploads fall back to their filename
+        assert "[2]\nTitle: notes.txt\nSource: notes.txt\nplain text" in ctx
+
+    def test_source_falls_back_to_original_file_name(self):
+        ctx = query._build_merged_context(
+            [self._node({"title": "Quiz", "uri": "", "source": "Quiz.docx", "filename": "Quiz.docling.json"})], [])
+        assert "Source: Quiz.docx" in ctx
+
+    def test_doc_sources_mark_cited_passages(self):
+        nodes = [
+            self._node({"title": "Wi-Fi", "uri": "https://example.edu/wifi",
+                        "headings": ["Wi-Fi", "Gaming Devices"], "source_type": "html"}),
+            self._node({"filename": "notes.txt"}),
+            self._node({"title": "Zoom"}),
+        ]
+        sources = query._doc_sources(nodes, "Register the MAC address [1]. See also [3][7].")
+        assert [(s["n"], s["cited"]) for s in sources] == [(1, True), (2, False), (3, True)]
+        assert sources[0]["uri"] == "https://example.edu/wifi"
+        assert sources[0]["headings"] == ["Wi-Fi", "Gaming Devices"]
+        assert sources[0]["source_type"] == "html"
+        assert sources[1]["title"] == "notes.txt"
+        assert sources[1]["uri"] == "" and sources[1]["headings"] == []
+
+    def test_citation_instructions_sent_even_with_custom_system_prompt(self):
+        from prompts import CITATION_INSTRUCTIONS
+        ws = _make_workspace(system_prompt="You are the URI IT Service Desk assistant.")
+        mock_response = MagicMock()
+        mock_response.message.content = "Use rhodywifi [1]."
+        with (
+            patch("query.embedding.retrieve", new=AsyncMock(return_value=[_make_mock_node()])),
+            patch("query.build_llm") as mock_llm_fn,
+        ):
+            mock_llm_fn.return_value.chat.return_value = mock_response
+            result = query.query_workspace(ws, "How do I connect my Xbox?")
+        messages = mock_llm_fn.return_value.chat.call_args.args[0]
+        assert CITATION_INSTRUCTIONS in messages[-1].content
+        assert result["sources"]["documents"][0]["cited"] is True
+
+    def test_citation_instructions_cover_web_only_context(self):
+        from prompts import CITATION_INSTRUCTIONS
+        assert query._context_instructions([], [{"url": "https://u"}]) == " " + CITATION_INSTRUCTIONS
+        assert query._context_instructions([], []) == ""
+
+    def test_web_sources_marked_cited_in_shared_numbering(self):
+        nodes = [self._node({"title": "Doc"})]
+        web = [
+            {"title": "Used", "url": "https://used.example", "snippet": "a"},
+            {"title": "Unused", "url": "https://unused.example", "snippet": "b"},
+        ]
+        payload = query._sources_payload(nodes, web, "From the doc [1] and the web [2].")
+        assert [(d["n"], d["cited"]) for d in payload["documents"]] == [(1, True)]
+        assert [(w["n"], w["cited"], w["url"]) for w in payload["web"]] == [
+            (2, True, "https://used.example"), (3, False, "https://unused.example"),
+        ]
+
 
 class TestRewriteIfEnabled:
     def test_no_rewrite_model_returns_original(self):
@@ -256,8 +336,8 @@ class TestQueryWorkspace:
     def test_web_search_results_included(self):
         ws = _make_workspace(searxng_enabled=1)
         web = [{"title": "T", "url": "https://u.com", "snippet": "s"}]
-        result = self._run(ws, "Q?", mock_nodes=[], mock_web=web)
-        assert result["sources"]["web"] == web
+        result = self._run(ws, "Q?", mock_nodes=[], mock_web=web, llm_answer="See [1].")
+        assert result["sources"]["web"] == [{**web[0], "n": 1, "cited": True}]
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +398,14 @@ class TestStreamQueryWorkspace:
         ws = _make_workspace()
         events = self._collect_stream(ws, "Q?")
         assert any("event: sources" in e for e in events)
+
+    def test_sources_event_marks_cited_passages(self):
+        ws = _make_workspace()
+        nodes = [_make_mock_node(filename="a.txt"), _make_mock_node(filename="b.txt")]
+        events = self._collect_stream(ws, "Q?", mock_nodes=nodes, tokens=["Answer ", "[2]", "."])
+        sources_event = next(e for e in events if e.startswith("event: sources"))
+        docs = json.loads(sources_event.split("data: ", 1)[1].strip())["documents"]
+        assert [(d["n"], d["cited"]) for d in docs] == [(1, False), (2, True)]
 
     def test_emits_log_event(self):
         ws = _make_workspace()
