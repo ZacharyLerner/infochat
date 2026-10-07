@@ -101,6 +101,33 @@ class TestTranslateSseLinesSource:
         data = json.loads(result.removeprefix("data: ").strip())
         assert data["sources"] == []
 
+    def test_sources_keep_citation_fields(self):
+        """Citation numbers, cited flags, titles, sections and links reach the frontend."""
+        payload = json.dumps({
+            "documents": [
+                {"n": 1, "cited": True, "filename": "wifi.docling.json", "title": "URI ITSD Internal - Wi-Fi",
+                 "uri": "https://sites.google.com/uri.edu/wiki/wi-fi",
+                 "headings": ["URI ITSD Internal - Wi-Fi", "Wi-Fi", "Gaming Devices"], "score": 0.8, "text": "t"},
+                {"n": 2, "cited": False, "filename": "quiz.docling.json", "title": "Quiz", "uri": "", "headings": []},
+            ],
+            "web": [{"n": 3, "cited": True, "title": "URI WiFi", "url": "https://rhodywifi.uri.edu/", "snippet": "s"}],
+        })
+        sources = json.loads(_translate_sse_lines("sources", payload).removeprefix("data: ").strip())["sources"]
+        assert [(s["n"], s["cited"], s["type"]) for s in sources] == [
+            (1, True, "document"), (2, False, "document"), (3, True, "web"),
+        ]
+        assert sources[0]["title"] == "URI ITSD Internal - Wi-Fi"
+        assert sources[0]["section"] == "Wi-Fi › Gaming Devices"
+        assert sources[0]["url"] == "https://sites.google.com/uri.edu/wiki/wi-fi"
+        assert sources[1]["url"] == "" and sources[1]["section"] == ""
+        assert sources[2]["url"] == "https://rhodywifi.uri.edu/"
+
+    def test_truncated_title_heading_not_repeated_as_section(self):
+        title = "KB0010034 - Students - Self-Enroll in the Students Getting Started with Brightspace Course"
+        payload = json.dumps({"documents": [{"n": 1, "cited": True, "title": title, "headings": [title[:80]]}]})
+        sources = json.loads(_translate_sse_lines("sources", payload).removeprefix("data: ").strip())["sources"]
+        assert sources[0]["section"] == ""
+
     def test_sources_missing_optional_fields(self):
         """Score, text, etc. are optional — model should not crash."""
         payload = json.dumps({"documents": [{"filename": "x.pdf"}]})

@@ -535,6 +535,57 @@ details.citations[open] .citations-chevron {
     background: var(--uri-blue-mid);
 }
 
+.citation-weblink:hover {
+    border-color: var(--uri-blue-light);
+    background: #f0f5fb;
+}
+
+.citation-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.citation-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    opacity: 0.75;
+}
+
+/* Inline [n] citations in the answer text */
+.cite-ref {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin: 0 1px;
+    padding: 0 4px;
+    height: 16px;
+    border-radius: 8px;
+    background: #e8eef6;
+    color: var(--uri-blue);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    vertical-align: 2px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+a.cite-ref:hover {
+    background: var(--uri-blue);
+    color: #fff;
+}
+
+.cite-ref svg {
+    width: 9px;
+    height: 9px;
+}
+
+.cite-ref-nolink {
+    cursor: default;
+    background: #f1f3f6;
+    color: var(--uri-blue-mid);
+}
+
 /* ========== Typing indicator ========== */
 .typing-indicator {
     display: inline-flex;

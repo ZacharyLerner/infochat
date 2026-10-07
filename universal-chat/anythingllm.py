@@ -30,6 +30,24 @@ EMAIL_PROMPT_SUFFIX = (
 MAX_FILE_CONTEXT_CHARS = 60_000
 
 
+def _map_doc_source(s: dict) -> dict:
+    """Frontend shape for a document source: its title and section (heading
+    path without the title itself) and its page link when it has one."""
+    title = s.get("title") or s.get("filename") or "Source"
+    # The heading path usually starts with the title (cut to 80 chars by the backend)
+    headings = [h for h in (s.get("headings") or []) if not title.startswith(h)]
+    return {
+        "n": s.get("n"),
+        "cited": s.get("cited"),
+        "title": title,
+        "section": " › ".join(headings),
+        "url": s.get("uri") or "",
+        "score": s.get("score"),
+        "text": s.get("text", ""),
+        "type": "document",
+    }
+
+
 def _translate_sse_lines(event_type: Optional[str], raw: str) -> Optional[str]:
     """Translate a single RhodyRAG SSE data line into the frontend's JSON format.
 
@@ -60,18 +78,15 @@ def _translate_sse_lines(event_type: Optional[str], raw: str) -> Optional[str]:
             doc_sources = payload if isinstance(payload, list) else []
             web_sources = []
 
-        mapped = [
+        # `n` is the number the answer cites as [n] (documents and web results
+        # share one sequence) and `cited` says whether the answer used it; both
+        # are absent from older backends, and the frontend then lists every source.
+        mapped = [_map_doc_source(s) for s in doc_sources] + [
             {
-                "title": s.get("filename", "Source"),
-                "url": "",
-                "score": s.get("score"),
-                "text": s.get("text", ""),
-                "type": "document",
-            }
-            for s in doc_sources
-        ] + [
-            {
+                "n": s.get("n"),
+                "cited": s.get("cited"),
                 "title": s.get("title", "Web Source"),
+                "section": "",
                 "url": s.get("url", ""),
                 "score": None,
                 "text": s.get("snippet", ""),

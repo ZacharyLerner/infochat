@@ -391,12 +391,44 @@
     .uc-citations summary::-webkit-details-marker { display: none; }
     .uc-citations-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
     .uc-citation-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      max-width: 100%;
       background: ${COLORS.border};
       border-radius: 4px;
       padding: 2px 6px;
       font-size: 10px;
       color: ${COLORS.textMuted};
+      text-decoration: none;
     }
+    a.uc-citation-badge { color: ${COLORS.text}; }
+    a.uc-citation-badge:hover { background: ${COLORS.accent}; color: #fff; }
+    .uc-citation-num { font-weight: 700; flex-shrink: 0; }
+    .uc-citation-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .uc-citation-badge svg { flex-shrink: 0; opacity: 0.8; }
+
+    /* Inline [n] citations in the answer text */
+    .uc-cite-ref {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      margin: 0 1px;
+      padding: 0 4px;
+      height: 15px;
+      border-radius: 8px;
+      background: ${COLORS.border};
+      color: ${COLORS.text};
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 1;
+      vertical-align: 2px;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    a.uc-cite-ref:hover { background: ${COLORS.accent}; color: #fff; }
+    .uc-cite-ref svg { width: 8px; height: 8px; }
+    .uc-cite-ref-nolink { cursor: default; color: ${COLORS.textMuted}; }
   `;
 
   const styleEl = document.createElement("style");
@@ -576,23 +608,106 @@
     return div;
   }
 
-  function buildCitations(sources) {
-    if (!sources || sources.length === 0) return "";
-    const seen = new Set();
-    const unique = sources.filter(s => {
-      const k = s.title || s.id;
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
+  // ── Citations ─────────────────────────────────────────────────────────────
+  // Only sources the answer cited are listed (numbered as in the answer), and
+  // each [n] in the answer becomes a clickable citation icon. Older backends
+  // send no `cited` flags: every source is listed, numbered by position.
+  const CITE_ICONS = {
+    link: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>',
+    web: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+    doc: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  };
+
+  function _safeHttpUrl(url) {
+    return /^https?:\/\//i.test(url || "") ? url : "";
+  }
+
+  function _citeLabel(s) {
+    const title = s.title || s.id || "Source";
+    return s.section ? `${title} › ${s.section}` : title;
+  }
+
+  function _citeIcon(s) {
+    if (!_safeHttpUrl(s.url)) return CITE_ICONS.doc;
+    return s.type === "web" ? CITE_ICONS.web : CITE_ICONS.link;
+  }
+
+  function citationEntries(sources) {
+    if (!sources || sources.length === 0) return [];
+    const hasFlags = sources.some(s => typeof s.cited === "boolean");
+    const listed = hasFlags ? sources.filter(s => s.cited) : sources;
+    const groups = new Map();
+    listed.forEach(s => {
+      const key = hasFlags ? `${_citeLabel(s)}|${s.url || ""}` : (s.title || s.id);
+      if (!groups.has(key)) groups.set(key, { source: s, numbers: [] });
+      if (hasFlags && s.n != null) groups.get(key).numbers.push(s.n);
     });
-    const badges = unique.map((s, i) => {
-      const label = _escHtml(s.title || s.id || `Source ${i + 1}`);
-      if (s.url) {
-        return `<a class="uc-citation-badge uc-citation-weblink" href="${_escHtml(s.url)}" target="_blank" rel="noopener noreferrer">${i + 1}. ${label}</a>`;
+    return [...groups.values()].map((g, i) => ({ ...g, numbers: g.numbers.length ? g.numbers : [i + 1] }));
+  }
+
+  function buildCitations(sources) {
+    const entries = citationEntries(sources);
+    if (entries.length === 0) return "";
+    const badges = entries.map(({ source, numbers }) => {
+      const label = _escHtml(_citeLabel(source));
+      const inner = `<span class="uc-citation-num">${numbers.join(", ")}</span><span class="uc-citation-label">${label}</span>${_citeIcon(source)}`;
+      const url = _safeHttpUrl(source.url);
+      if (url) {
+        return `<a class="uc-citation-badge uc-citation-weblink" href="${_escHtml(url)}" target="_blank" rel="noopener noreferrer" title="${label}">${inner}</a>`;
       }
-      return `<span class="uc-citation-badge">${i + 1}. ${label}</span>`;
+      return `<span class="uc-citation-badge" title="${label}">${inner}</span>`;
     }).join("");
-    return `<details class="uc-citations"><summary>Sources (${unique.length})</summary><div class="uc-citations-list">${badges}</div></details>`;
+    return `<details class="uc-citations"><summary>Sources (${entries.length})</summary><div class="uc-citations-list">${badges}</div></details>`;
+  }
+
+  // Replace [n] / [n, m] markers in a rendered answer with clickable citation
+  // icons; markers inside links or code, and unknown numbers, are left alone.
+  function linkifyCitations(container, sources) {
+    if (!container || !sources || sources.length === 0) return;
+    const byNumber = new Map(sources.filter(s => s.n != null).map(s => [s.n, s]));
+    if (byNumber.size === 0) return;
+
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode: node =>
+        node.parentElement && node.parentElement.closest("a, code, pre, .uc-citations")
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    });
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+    const marker = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+    for (const node of textNodes) {
+      const text = node.nodeValue;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      let match;
+      marker.lastIndex = 0;
+      while ((match = marker.exec(text))) {
+        const numbers = match[1].split(",").map(n => parseInt(n.trim(), 10));
+        if (!numbers.every(n => byNumber.has(n))) continue;
+        frag.append(text.slice(last, match.index));
+        numbers.forEach(n => frag.append(_citeRef(n, byNumber.get(n))));
+        last = match.index + match[0].length;
+      }
+      if (last === 0) continue;
+      frag.append(text.slice(last));
+      node.replaceWith(frag);
+    }
+  }
+
+  function _citeRef(n, source) {
+    const url = _safeHttpUrl(source.url);
+    const el = document.createElement(url ? "a" : "span");
+    el.className = url ? "uc-cite-ref" : "uc-cite-ref uc-cite-ref-nolink";
+    el.title = _citeLabel(source);
+    if (url) {
+      el.href = url;
+      el.target = "_blank";
+      el.rel = "noopener noreferrer";
+    }
+    el.innerHTML = `<span>${n}</span>${_citeIcon(source)}`;
+    return el;
   }
 
   // ── Markdown renderer (built-in, no external dependency) ─────────────────
@@ -770,6 +885,7 @@
       const { mainText, questions } = parseFollowUp(fullText);
       const citHtml = buildCitations(sources);
       bubble.innerHTML = renderMarkdown(mainText) + citHtml;
+      linkifyCitations(bubble, sources);
 
       if (settings.followup_enabled && questions.length > 0) {
         const chipsEl = document.createElement("div");
