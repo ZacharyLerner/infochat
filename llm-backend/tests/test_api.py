@@ -148,9 +148,6 @@ class TestWorkspaceCRUD:
                 "temperature": 0.5,
                 "top_n": 10,
                 "similarity_threshold": 0.6,
-                "chunk_size": 512,
-                "chunk_overlap": 50,
-                "max_tokens": 2048,
                 "searxng_enabled": False,
                 "searxng_num_results": 5,
                 "searxng_query_suffix": "site:uri.edu",
@@ -163,8 +160,6 @@ class TestWorkspaceCRUD:
         assert data["llm_model"] == "openai/gpt-4o"
         assert data["temperature"] == pytest.approx(0.5)
         assert data["top_n"] == 10
-        assert data["chunk_size"] == 512
-        assert data["max_tokens"] == 2048
         assert data["searxng_query_suffix"] == "site:uri.edu"
 
     def test_list_workspaces_after_create(self, test_client):

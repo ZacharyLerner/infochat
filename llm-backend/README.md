@@ -97,13 +97,13 @@ curl -X POST localhost:3001/api/workspace/<slug>/query -H "$H" -H "Content-Type:
   -d '{"question": "What are the library hours?"}'
 ```
 
-The embedding model, chunk size and chunk overlap are fixed once a workspace is created.
+The embedding model is fixed once a workspace is created.
 
 ## DoclingDocument uploads and citations
 
 The upload service converts files and web pages with Docling and sends them to `/embed` as DoclingDocument JSON named `<name>.docling.json`. These are chunked differently from other files:
 
-- Docling's `HybridChunker` splits at section boundaries (up to 512 tokens) and prefixes each chunk with its heading path. Chunks under 128 tokens are merged into a neighbour. Tokens are counted with `DOCLING_TOKENIZER` (default `Qwen/Qwen3-Embedding-8B`, matching qwen3-embed-8b), which the Docker image downloads at build time. The workspace's chunk size and overlap apply only to other files.
+- Docling's `HybridChunker` splits at section boundaries (up to 512 tokens) and prefixes each chunk with its heading path. Chunks under 128 tokens are merged into a neighbour. Tokens are counted with `DOCLING_TOKENIZER` (default `Qwen/Qwen3-Embedding-8B`, matching qwen3-embed-8b), which the Docker image downloads at build time. Other files (e.g. JSON, CSV, or uploads Docling couldn't convert) are split into 1024-token sentence chunks with 104 tokens of overlap.
 - Each vector stores `title`, `uri` (the page's link), `source` (original file name), `source_type` and `headings`.
 
 When answering, document passages are numbered and sent with their `Title:` and `Source:` lines, and the model cites them as `[1]`, `[2]`. Each entry in `sources.documents` has `n`, `cited`, `title`, `uri` and `headings`, so clients list the cited passages under the answer themselves. The model does not write a sources list.

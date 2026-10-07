@@ -41,8 +41,6 @@ def _ws(**overrides):
         "embed_model": "openai/text-embedding-3-small",
         "api_key": "key",
         "embed_api_key": "",
-        "chunk_size": 1024,
-        "chunk_overlap": 104,
     }
     ws.update(overrides)
     return ws
@@ -246,9 +244,9 @@ class TestEmbedWorkspaceFile:
         text = s3v.put_vectors.call_args.kwargs["vectors"][0]["metadata"]["text"]
         assert len(text) == 6000
 
-    def test_chunk_size_capped_at_1700(self, s3v):
-        _, mock_splitter = self._embed(_ws(chunk_size=2048), ["a"])
-        assert mock_splitter.call_args.kwargs["chunk_size"] <= 1700
+    def test_plain_files_use_fixed_chunk_size(self, s3v):
+        _, mock_splitter = self._embed(_ws(), ["a"])
+        assert mock_splitter.call_args.kwargs == {"chunk_size": 1024, "chunk_overlap": 104}
 
     def test_put_batched_at_500(self, s3v):
         self._embed(_ws(), ["t"] * 1100)

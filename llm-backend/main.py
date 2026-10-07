@@ -162,11 +162,8 @@ class CreateWorkspace(BaseModel):
     system_prompt: Optional[str] = Field(None, description="System prompt prepended to every query.")
     top_n: Optional[int] = Field(None, description="Number of most-similar chunks to retrieve and pass to the LLM.")
     similarity_threshold: Optional[float] = Field(None, description="Minimum cosine similarity score (0–1) a chunk must meet to be included.")
-    chunk_size: Optional[int] = Field(None, description="Token size of each chunk for plain files (DoclingDocument uploads are chunked by section, up to 512 tokens). Locked after creation — changing this after files are embedded would cause inconsistent retrieval.")
-    chunk_overlap: Optional[int] = Field(None, description="Token overlap between consecutive chunks. Locked after creation for the same reason as chunk_size.")
     embed_model: Optional[str] = Field(None, description="Embedding model for this workspace. Locked after creation — changing it would cause vector dimension mismatches. Falls back to the global default if blank. Use 'direct-openai/<model>' to bypass the gateway.")
     embed_api_key: Optional[str] = Field(None, description="API key for the embedding model. Only needed when using a direct-openai/ embedding model that requires its own key separate from the LLM gateway key.")
-    max_tokens: Optional[int] = Field(None, description="Maximum number of tokens the LLM may generate in a single response.")
     searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation for every query in this workspace.")
     searxng_num_results: Optional[int] = Field(None, description="Number of web search results to fetch per query (1–10).")
     searxng_query_suffix: Optional[str] = Field(None, description="Text appended to every web search query (e.g. 'site:uri.edu'). Does not affect vector retrieval.")
@@ -184,7 +181,6 @@ class UpdateWorkspace(BaseModel):
     top_n: Optional[int] = Field(None)
     similarity_threshold: Optional[float] = Field(None)
     embed_api_key: Optional[str] = Field(None)
-    max_tokens: Optional[int] = Field(None)
     searxng_enabled: Optional[bool] = Field(None, description="Enable SearXNG web search augmentation.")
     searxng_num_results: Optional[int] = Field(None, description="Number of web search results to fetch per query (1–10).")
     searxng_query_suffix: Optional[str] = Field(None, description="Text appended to every web search query (e.g. 'site:uri.edu'). Does not affect vector retrieval.")
@@ -205,11 +201,8 @@ class UpdateSettings(BaseModel):
     system_prompt: Optional[str] = None
     top_n: Optional[int] = None
     similarity_threshold: Optional[float] = None
-    chunk_size: Optional[int] = None
-    chunk_overlap: Optional[int] = None
     embed_model: Optional[str] = None
     embed_api_key: Optional[str] = None
-    max_tokens: Optional[int] = None
     searxng_enabled: Optional[bool] = None
     searxng_num_results: Optional[int] = None
     searxng_query_suffix: Optional[str] = None
@@ -277,11 +270,8 @@ def create_workspace(body: CreateWorkspace):
         system_prompt=body.system_prompt or "",
         top_n=body.top_n if body.top_n is not None else 5,
         similarity_threshold=body.similarity_threshold if body.similarity_threshold is not None else 0.5,
-        chunk_size=body.chunk_size if body.chunk_size is not None else 1024,
-        chunk_overlap=body.chunk_overlap if body.chunk_overlap is not None else 104,
         embed_model=body.embed_model or "",
         embed_api_key=body.embed_api_key or "",
-        max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
         searxng_enabled=int(body.searxng_enabled) if body.searxng_enabled is not None else 0,
         searxng_num_results=min(int(body.searxng_num_results), 10) if body.searxng_num_results is not None else 3,
         searxng_query_suffix=body.searxng_query_suffix or "",

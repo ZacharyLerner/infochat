@@ -41,11 +41,8 @@ SETTINGS_DEFAULTS = {
     "system_prompt": "",
     "top_n": 5,
     "similarity_threshold": 0.5,
-    "chunk_size": 1024,
-    "chunk_overlap": 104,
     "embed_model": "",
     "embed_api_key": "",
-    "max_tokens": 1024,
     "searxng_enabled": 0,
     "searxng_num_results": 3,
     "searxng_query_suffix": "site:uri.edu",
@@ -55,8 +52,8 @@ SETTINGS_DEFAULTS = {
 WORKSPACE_DEFAULTS = {**SETTINGS_DEFAULTS, "searxng_query_suffix": ""}
 
 _SETTINGS_FIELDS = set(SETTINGS_DEFAULTS)
-# chunk_size, chunk_overlap and embed_model are locked after creation
-_WORKSPACE_MUTABLE_FIELDS = {"name"} | _SETTINGS_FIELDS - {"chunk_size", "chunk_overlap", "embed_model"}
+# embed_model is locked after creation
+_WORKSPACE_MUTABLE_FIELDS = {"name"} | _SETTINGS_FIELDS - {"embed_model"}
 
 # Conditional-write retries. A batch upload sends ~10 embeds at once and each
 # appends to the same docs.json, so losers wait a random time that doubles per
@@ -196,11 +193,8 @@ def create_workspace(
     system_prompt: str = "",
     top_n: int = 5,
     similarity_threshold: float = 0.5,
-    chunk_size: int = 1024,
-    chunk_overlap: int = 104,
     embed_model: str = "",
     embed_api_key: str = "",
-    max_tokens: int = 1024,
     searxng_enabled: int = 0,
     searxng_num_results: int = 3,
     searxng_query_suffix: str = "",
@@ -218,11 +212,8 @@ def create_workspace(
         "system_prompt": system_prompt or defaults["system_prompt"],
         "top_n": top_n if top_n is not None else defaults["top_n"],
         "similarity_threshold": similarity_threshold if similarity_threshold is not None else defaults["similarity_threshold"],
-        "chunk_size": chunk_size if chunk_size is not None else defaults["chunk_size"],
-        "chunk_overlap": chunk_overlap if chunk_overlap is not None else defaults["chunk_overlap"],
         "embed_model": embed_model or defaults["embed_model"],
         "embed_api_key": embed_api_key if embed_api_key is not None else defaults["embed_api_key"],
-        "max_tokens": max_tokens if max_tokens is not None else defaults["max_tokens"],
         "searxng_enabled": searxng_enabled if searxng_enabled is not None else defaults["searxng_enabled"],
         "searxng_num_results": searxng_num_results if searxng_num_results is not None else defaults["searxng_num_results"],
         "searxng_query_suffix": searxng_query_suffix if searxng_query_suffix is not None else defaults["searxng_query_suffix"],

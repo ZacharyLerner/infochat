@@ -108,24 +108,12 @@
               <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
             </div>
             <div class="form-row">
-              <label>Max Tokens</label>
-              <input type="number" name="max_tokens" min="1" />
-            </div>
-            <div class="form-row">
               <label>Embed API Key</label>
               <input type="password" name="embed_api_key" />
             </div>
             <div class="form-row full-width">
               <label>System Prompt</label>
               <textarea name="system_prompt" rows="4"></textarea>
-            </div>
-            <div class="form-row readonly-section">
-              <label>Chunk Size <span class="muted">(locked)</span></label>
-              <input type="text" name="chunk_size" disabled />
-            </div>
-            <div class="form-row readonly-section">
-              <label>Chunk Overlap <span class="muted">(locked)</span></label>
-              <input type="text" name="chunk_overlap" disabled />
             </div>
             <div class="form-row readonly-section">
               <label>Embed Model <span class="muted">(locked)</span></label>
@@ -291,18 +279,6 @@
                 <label>Similarity Threshold</label>
                 <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
               </div>
-              <div class="form-row">
-                <label>Max Tokens</label>
-                <input type="number" name="max_tokens" min="1" />
-              </div>
-              <div class="form-row">
-                <label>Chunk Size <span class="muted">(locked after creation)</span></label>
-                <input type="number" name="chunk_size" placeholder="e.g. 1024" />
-              </div>
-              <div class="form-row">
-                <label>Chunk Overlap <span class="muted">(locked after creation)</span></label>
-                <input type="number" name="chunk_overlap" placeholder="e.g. 104" />
-              </div>
               <div class="form-row full-width">
                 <label>System Prompt</label>
                 <textarea name="system_prompt" rows="4" placeholder="Leave blank to use global default"></textarea>
@@ -374,18 +350,6 @@
           <div class="form-row">
             <label>Similarity Threshold</label>
             <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
-          </div>
-          <div class="form-row">
-            <label>Max Tokens</label>
-            <input type="number" name="max_tokens" min="1" />
-          </div>
-          <div class="form-row">
-            <label>Chunk Size</label>
-            <input type="number" name="chunk_size" min="1" />
-          </div>
-          <div class="form-row">
-            <label>Chunk Overlap</label>
-            <input type="number" name="chunk_overlap" min="0" />
           </div>
           <div class="form-row">
             <label>Embed Model</label>

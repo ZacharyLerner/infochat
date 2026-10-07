@@ -493,10 +493,10 @@ workspaceSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = formToObj(workspaceSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
-    'similarity_threshold', 'system_prompt', 'embed_api_key', 'max_tokens',
+    'similarity_threshold', 'system_prompt', 'embed_api_key',
     'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'max_tokens', 'searxng_num_results']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'searxng_num_results']);
   data.searxng_enabled = workspaceSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(wsSettingsMsg, 'Saving...');
@@ -640,11 +640,11 @@ createWorkspaceForm.addEventListener('submit', async (e) => {
   if (createStep < 3) return createNext();
   const data = formToObj(createWorkspaceForm, [
     'name', 'llm_model', 'api_key', 'temperature', 'top_n',
-    'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'similarity_threshold',
+    'embed_model', 'embed_api_key', 'system_prompt',
     'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens', 'searxng_num_results']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'searxng_num_results']);
   data.searxng_enabled = createWorkspaceForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(createWorkspaceMsg, 'Creating...');
@@ -1173,11 +1173,11 @@ globalSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const data = formToObj(globalSettingsForm, [
     'llm_model', 'api_key', 'temperature', 'top_n',
-    'similarity_threshold', 'chunk_size', 'chunk_overlap',
-    'embed_model', 'embed_api_key', 'system_prompt', 'max_tokens',
+    'similarity_threshold',
+    'embed_model', 'embed_api_key', 'system_prompt',
     'searxng_num_results', 'searxng_query_suffix', 'rewrite_model', 'rewrite_prompt',
   ]);
-  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'chunk_size', 'chunk_overlap', 'max_tokens', 'searxng_num_results']);
+  castNumbers(data, ['temperature', 'top_n', 'similarity_threshold', 'searxng_num_results']);
   data.searxng_enabled = globalSettingsForm.elements['searxng_enabled'].checked ? 1 : 0;
 
   showMsg(globalSettingsMsg, 'Saving...');

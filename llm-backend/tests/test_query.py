@@ -29,7 +29,6 @@ def _make_workspace(**overrides):
         "system_prompt": "",
         "top_n": 5,
         "similarity_threshold": 0.5,
-        "max_tokens": 1024,
         "embed_model": "openai/text-embedding-3-small",
         "embed_api_key": "",
         "searxng_enabled": 0,
@@ -492,7 +491,7 @@ class TestStreamQueryWorkspace:
 class TestBuildLLM:
     def test_returns_gateway_litellm_instance(self):
         with patch("query.LiteLLM.__init__", return_value=None):
-            llm = query.build_llm("openai/gpt-4o", "key", 0.5, "sys", 512)
+            llm = query.build_llm("openai/gpt-4o", "key", 0.5, "sys")
             assert isinstance(llm, query._GatewayLiteLLM)
 
     def test_metadata_context_window_overridden(self):

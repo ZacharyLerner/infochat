@@ -25,9 +25,8 @@ class TestSettings:
         assert s["temperature"] == pytest.approx(0.7)
         assert s["top_n"] == 5
         assert s["similarity_threshold"] == pytest.approx(0.5)
-        assert s["chunk_size"] == 1024
-        assert s["chunk_overlap"] == 104
-        assert s["max_tokens"] == 1024
+        assert "chunk_size" not in s
+        assert "max_tokens" not in s
         assert s["searxng_enabled"] == 0
         assert s["searxng_num_results"] == 3
 
@@ -38,10 +37,9 @@ class TestSettings:
         assert s["top_n"] == 5
 
     def test_update_multiple_fields(self):
-        s = db.update_settings(llm_model="openai/gpt-4o", top_n=10, max_tokens=2048)
+        s = db.update_settings(llm_model="openai/gpt-4o", top_n=10)
         assert s["llm_model"] == "openai/gpt-4o"
         assert s["top_n"] == 10
-        assert s["max_tokens"] == 2048
 
     def test_update_settings_ignores_unknown_fields(self):
         """Unknown keys must be silently ignored."""
@@ -138,15 +136,9 @@ class TestWorkspaceCRUD:
             name="Gamma",
             temperature=0.2,
             top_n=3,
-            chunk_size=512,
-            chunk_overlap=50,
-            max_tokens=256,
         )
         assert ws["temperature"] == pytest.approx(0.2)
         assert ws["top_n"] == 3
-        assert ws["chunk_size"] == 512
-        assert ws["chunk_overlap"] == 50
-        assert ws["max_tokens"] == 256
 
     def test_create_workspace_falls_back_to_global_defaults(self):
         """When global llm_model is set, a workspace with blank llm_model should inherit it."""
@@ -197,7 +189,6 @@ class TestWorkspaceCRUD:
             temperature=0.9,
             top_n=8,
             similarity_threshold=0.7,
-            max_tokens=512,
             searxng_enabled=1,
             searxng_num_results=5,
             searxng_query_suffix="site:edu",
@@ -207,7 +198,6 @@ class TestWorkspaceCRUD:
         assert updated["temperature"] == pytest.approx(0.9)
         assert updated["top_n"] == 8
         assert updated["similarity_threshold"] == pytest.approx(0.7)
-        assert updated["max_tokens"] == 512
         assert updated["searxng_enabled"] == 1
         assert updated["searxng_num_results"] == 5
         assert updated["searxng_query_suffix"] == "site:edu"
@@ -215,12 +205,11 @@ class TestWorkspaceCRUD:
         assert updated["rewrite_prompt"] == "Be brief."
 
     def test_update_workspace_locked_fields_not_accepted(self):
-        """chunk_size and embed_model should not be changeable via update_workspace."""
-        ws = db.create_workspace(name="Locked", chunk_size=512, embed_model="model-a")
-        db.update_workspace(ws["slug"], chunk_size=256, embed_model="model-b")
+        """embed_model should not be changeable via update_workspace."""
+        ws = db.create_workspace(name="Locked", embed_model="model-a")
+        db.update_workspace(ws["slug"], embed_model="model-b")
         refetched = db.get_workspace(ws["slug"])
         # Locked fields must remain at creation values
-        assert refetched["chunk_size"] == 512
         assert refetched["embed_model"] == "model-a"
 
     def test_update_workspace_no_fields_returns_current(self):

@@ -39,6 +39,11 @@ _MAX_TOP_K = 100       # results per query_vectors call
 # Texts per embedding request to the gateway
 _EMBED_BATCH = 16
 
+# Sentence-split chunking for files that aren't DoclingDocuments (e.g. JSON,
+# CSV, or uploads Docling couldn't convert). DoclingDocuments use HybridChunker.
+_CHUNK_SIZE = 1024
+_CHUNK_OVERLAP = 104
+
 # Chunk text is stored as metadata for retrieval. Filterable metadata is
 # capped at 2 KB per vector, so large fields must be declared non-filterable
 # when the index is created (this cannot be changed afterwards).
@@ -205,7 +210,7 @@ def delete_workspace_file(slug: str, doc_id: str, chunks: int) -> int:
     return chunks
 
 
-def _split_text_file(ws: dict, filename: str, file_obj) -> list[dict]:
+def _split_text_file(filename: str, file_obj) -> list[dict]:
     """Parse a plain file with SimpleDirectoryReader and split it into sentence chunks."""
     # Write uploaded file to a temp directory for SimpleDirectoryReader
     tmp_dir = tempfile.mkdtemp()
@@ -223,16 +228,10 @@ def _split_text_file(ws: dict, filename: str, file_obj) -> list[dict]:
     if not documents:
         return []
 
-    # Cap chunk_size to 1700 tokens. SentenceSplitter counts with tiktoken
-    # (cl100k), but qwen3-embed-8b uses its own tokenizer which produces
-    # higher counts for the same text — empirically up to ~10% more tokens.
-    # 1700 tiktoken tokens ≈ ≤1870 qwen3 tokens, safely under the 2048 limit.
-    chunk_size = min(ws["chunk_size"], 1700)
-
-    splitter = SentenceSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=ws["chunk_overlap"],
-    )
+    # SentenceSplitter counts with tiktoken (cl100k), but qwen3-embed-8b uses
+    # its own tokenizer which produces up to ~10% more tokens for the same
+    # text, so 1024 tiktoken tokens stays well under its 2048 limit.
+    splitter = SentenceSplitter(chunk_size=_CHUNK_SIZE, chunk_overlap=_CHUNK_OVERLAP)
     nodes = splitter.get_nodes_from_documents(documents)
 
     # Hard-truncate each chunk to 6000 characters as a final safety net
@@ -279,7 +278,7 @@ def embed_workspace_file(slug: str, filename: str, file_obj) -> tuple[int, str]:
     if docling_chunks.is_docling_file(filename):
         chunks = _split_docling_file(file_obj)
     else:
-        chunks = _split_text_file(ws, filename, file_obj)
+        chunks = _split_text_file(filename, file_obj)
     if not chunks:
         return 0, ""
 
