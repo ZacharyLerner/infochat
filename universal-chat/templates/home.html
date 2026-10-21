@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ name }}</title>
+  <link rel="stylesheet" href="/static/css/main.css?v=2" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+  <!-- ========== Page Header ========== -->
+  <div class="page-header-bar">
+    <div class="page-header-inner">
+      <div class="page-header-left">
+        <!-- Sidebar toggle lives in the main header so it's always visible -->
+        <button class="btn-sidebar-toggle btn-sidebar-toggle--header" id="sidebar-toggle-btn"
+                title="Toggle chat history" onclick="toggleSidebar()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>
+          </svg>
+        </button>
+        <div>
+          <h1>{{ name }}</h1>
+          <p class="subtitle">Workspace {{ slug }}</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="btn-reset" href="/settings?slug={{ slug }}">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Settings
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Page Body (sidebar + chat) ========== -->
+  <div class="page-body">
+
+    <!-- ===== Sessions Sidebar ===== -->
+    <aside class="sessions-sidebar" id="sessions-sidebar">
+      <div class="sessions-sidebar-header">
+        <span class="sessions-sidebar-title">Chats</span>
+        <button class="btn-new-chat" id="new-chat-btn" onclick="startNewChat()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          New Chat
+        </button>
+      </div>
+      <div class="session-list" id="session-list">
+        <!-- Populated by renderSessionList() in utils.js -->
+      </div>
+    </aside>
+
+    <!-- ===== Chat Panel ===== -->
+    <div class="chat-panel">
+
+      <!-- Panel label -->
+      <div class="chat-panel-header">
+        <span class="chat-panel-title" id="chat-panel-title">Conversation</span>
+        <span class="chat-panel-desc">Chat mode &mdash; rolling history</span>
+      </div>
+
+      <!-- Messages -->
+      <div id="chat-window" data-empty-text="Send a message to get started."></div>
+
+      <!-- Default Question Chips -->
+      <div id="default-questions-bar"></div>
+
+      <!-- File Attachments (shown above input bar when a file is attached) -->
+      <div id="file-attachments"></div>
+
+      <!-- Input -->
+      <div id="input-bar">
+        <!-- Hidden file input -->
+        <input
+          type="file"
+          id="file-input"
+          accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tiff,.tif,.docx,.pptx,.xlsx,.txt,.md,.csv"
+          style="display:none"
+          onchange="handleFileSelect(this)"
+        />
+        <!-- Paperclip / attach button -->
+        <button id="upload-btn" title="Attach a file" type="button" onclick="document.getElementById('file-input').click()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
+        <textarea id="message-input" placeholder="Type a message..." rows="1" autocomplete="off"></textarea>
+        <button id="send-btn" onclick="sendMessage()">Send</button>
+      </div>
+
+      <!-- ===== Embed Snippet (collapsed by default) ===== -->
+      <details class="embed-snippet-section" id="embed-details">
+        <summary class="embed-snippet-summary">
+          <svg class="embed-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+          Embed this workspace
+        </summary>
+        <div class="embed-snippet-inner">
+          <div class="embed-snippet-code-wrap">
+            <pre id="embed-snippet-code" class="embed-snippet-code"></pre>
+            <button class="embed-snippet-copy-btn" onclick="copyEmbedSnippet()" id="embed-copy-btn">Copy</button>
+          </div>
+          <p class="embed-snippet-hint">
+            Paste this tag into any HTML page. The chat will appear as a floating button.
+            Add <code>data-position="bottom-left"</code>, <code>data-theme="dark"</code>,
+            or <code>data-title="Ask us anything"</code> to customise the widget.
+          </p>
+        </div>
+      </details>
+
+    </div><!-- /.chat-panel -->
+  </div><!-- /.page-body -->
+
+  <!-- ========== Email Confirmation Modal ========== -->
+  <div class="modal-backdrop" id="email-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="email-modal-title">
+    <div class="modal-box email-modal-box">
+      <div class="modal-title" id="email-modal-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2,4 12,13 22,4"/></svg>
+        Review &amp; Send Email
+      </div>
+      <div class="modal-body">
+        <p class="email-modal-hint">The assistant drafted this email. Review and edit before sending.</p>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-from">From</label>
+          <input type="email" id="email-from" class="email-field-input" placeholder="noreply@uri.edu" />
+        </div>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-to">To <span class="email-required">*</span></label>
+          <input type="text" id="email-to" class="email-field-input" placeholder="recipient@uri.edu" />
+        </div>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-subject">Subject <span class="email-required">*</span></label>
+          <input type="text" id="email-subject" class="email-field-input" placeholder="Subject" />
+        </div>
+        <div class="email-field-group">
+          <label class="email-field-label" for="email-body">Body <span class="email-required">*</span></label>
+          <textarea id="email-body" class="email-field-textarea" rows="7" placeholder="Email body…"></textarea>
+        </div>
+        <div class="email-modal-status" id="email-modal-status"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-secondary" onclick="closeEmailConfirmModal()">Cancel</button>
+        <button class="modal-btn modal-btn-primary" id="email-send-btn" onclick="confirmSendEmail()">Send Email</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const WORKSPACE_SLUG = "{{ slug }}";
+
+    // Build embed snippet using the current page origin
+    (function () {
+      const origin = window.location.origin;
+      const snippet = `<script\n  src="${origin}/embed.js"\n  data-workspace="{{ slug }}"\n><\/script>`;
+      document.getElementById("embed-snippet-code").textContent = snippet;
+    })();
+
+    function copyEmbedSnippet() {
+      const code = document.getElementById("embed-snippet-code").textContent;
+      const btn  = document.getElementById("embed-copy-btn");
+      navigator.clipboard.writeText(code).then(() => {
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
+      }).catch(() => {
+        const ta = document.createElement("textarea");
+        ta.value = code;
+        ta.style.position = "fixed";
+        ta.style.opacity  = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 2000);
+      });
+    }
+
+    // Sidebar collapse/expand — persisted in localStorage
+    function toggleSidebar() {
+      const sidebar = document.getElementById("sessions-sidebar");
+      const isCollapsed = sidebar.classList.toggle("collapsed");
+      localStorage.setItem("rhodyrag_sidebar_collapsed", isCollapsed ? "1" : "0");
+    }
+
+    // Restore sidebar state on load
+    (function () {
+      if (localStorage.getItem("rhodyrag_sidebar_collapsed") === "1") {
+        document.getElementById("sessions-sidebar").classList.add("collapsed");
+      }
+    })();
+  </script>
+  <script src="/static/js/utils.js?v=5"></script>
+
+</body>
+</html>
