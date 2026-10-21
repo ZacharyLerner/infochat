@@ -47,6 +47,8 @@ Other optional variables (`OPENAI_API_BASE`, `SEARXNG_URL`, `FILE_SERVER_URL`, `
 
 ## Running
 
+All commands run from the `llm-backend/` folder.
+
 **Docker Compose (development):** mounts the source and reloads on code changes.
 
 ```bash

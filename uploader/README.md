@@ -13,8 +13,8 @@ sudo dnf install -y python3.11 mesa-libGL libxcb libX11
 ## 2. Clone and Create Venv
 
 ```bash
-git clone <your-repo-url> anythingllm-uploader
-cd anythingllm-uploader
+git clone --filter=blob:none --sparse https://github.com/ZacharyLerner/infochat.git
+cd infochat && git sparse-checkout set uploader && cd uploader
 
 python3.11 -m venv venv
 source venv/bin/activate
