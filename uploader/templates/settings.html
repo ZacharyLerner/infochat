@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', path='css/main.css') }}?v=5">
+    <title>{{ workspace.name }} - Settings</title>
+    <style>
+        body { padding: 0; min-height: 100vh; }
+
+        .settings-chrome {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Top bar — matches home page header */
+        .settings-topbar {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 18px 28px;
+            background: var(--uri-blue);
+            border-bottom: 3px solid var(--uri-gold);
+            flex-shrink: 0;
+            box-shadow: 0 2px 8px rgba(0,33,71,0.22);
+        }
+
+        .settings-topbar-title { flex: 1; min-width: 0; }
+
+        .settings-topbar-title h1 {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+            margin: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .settings-topbar-title p {
+            font-size: 12px;
+            color: rgba(208,166,39,0.85);
+            margin: 2px 0 0;
+            letter-spacing: 0.2px;
+        }
+
+        /* Scrollable body */
+        .settings-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 28px 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            background: var(--bg);
+        }
+
+        /* System Prompt */
+        .setting-group-prompt label {
+            display: block;
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--uri-blue);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 7px;
+        }
+
+        .setting-group-prompt textarea {
+            width: 100%;
+            min-height: 280px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 12px 14px;
+            font-size: 13px;
+            font-family: inherit;
+            line-height: 1.65;
+            resize: vertical;
+            color: var(--uri-blue);
+            background: #fff;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+
+        .setting-group-prompt textarea:focus {
+            outline: none;
+            border-color: var(--uri-blue);
+            box-shadow: 0 0 0 2px rgba(0,33,71,0.1);
+        }
+
+        /* Three controls */
+        .settings-controls-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 14px;
+            padding-top: 4px;
+            border-top: 1px solid var(--border);
+        }
+
+        .settings-controls-row .setting-group { margin-bottom: 0; }
+
+        .settings-controls-row .setting-group label {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--uri-blue);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 7px;
+            display: block;
+        }
+
+        .settings-controls-row .setting-hint { font-size: 10px; }
+        .settings-controls-row .setting-range-row { gap: 8px; }
+        .settings-controls-row .range-value-input { width: 44px; font-size: 12px; padding: 3px 4px; }
+        .settings-controls-row .setting-select { font-size: 12px; padding: 6px 8px; }
+
+
+    </style>
+</head>
+<body>
+<div class="settings-chrome">
+
+    <div class="settings-topbar">
+        <a class="settings-back-link" href="/{{ workspace.id }}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            Back
+        </a>
+        <div class="settings-topbar-title">
+            <h1>{{ workspace.name }}</h1>
+            <p>Workspace Settings</p>
+        </div>
+        <button class="btn-settings-save" id="settingsSaveBtn">Save Settings</button>
+    </div>
+
+    <div class="settings-body" data-workspace="{{ workspace.id }}">
+
+        <div class="setting-group-prompt">
+            <label for="settingPrompt">System Prompt</label>
+            <textarea id="settingPrompt" rows="10" placeholder="Loading settings..."></textarea>
+        </div>
+
+        <div class="settings-controls-row">
+            <div class="setting-group">
+                <label for="settingTopN">Top N Results</label>
+                <div class="setting-range-row">
+                    <input type="range" id="settingTopN" min="1" max="10" value="4" step="1">
+                    <input type="number" class="range-value-input" id="topNValue" min="1" max="10" step="1" value="4">
+                </div>
+                <p class="setting-hint">Chunks retrieved per query.</p>
+            </div>
+
+            <div class="setting-group">
+                <label for="settingTemp">Temperature</label>
+                <div class="setting-range-row">
+                    <input type="range" id="settingTemp" min="0" max="1" value="0.7" step="0.1">
+                    <input type="number" class="range-value-input" id="tempValue" min="0" max="1" step="0.1" value="0.7">
+                </div>
+                <p class="setting-hint">Higher = more creative.</p>
+            </div>
+
+            <div class="setting-group">
+                <label for="settingSimilarity">Similarity Threshold</label>
+                <select class="setting-select" id="settingSimilarity">
+                    <option value="0">No restriction</option>
+                    <option value="0.25" selected>Low (&ge; .25)</option>
+                    <option value="0.5">Medium (&ge; .50)</option>
+                    <option value="0.75">High (&ge; .75)</option>
+                </select>
+                <p class="setting-hint">Min relevance for chunks.</p>
+            </div>
+        </div>
+
+
+
+    </div>
+</div>
+
+<script>
+const workspaceId = document.querySelector(".settings-body").dataset.workspace;
+
+const promptEl  = document.getElementById("settingPrompt");
+const topNEl    = document.getElementById("settingTopN");
+const topNInput = document.getElementById("topNValue");
+const tempEl    = document.getElementById("settingTemp");
+const tempInput = document.getElementById("tempValue");
+const simEl     = document.getElementById("settingSimilarity");
+const saveBtn   = document.getElementById("settingsSaveBtn");
+
+// Range <-> number sync
+topNEl.addEventListener("input", () => { topNInput.value = topNEl.value; });
+topNInput.addEventListener("input", () => { topNEl.value = Math.min(Math.max(parseInt(topNInput.value) || 1, 1), 10); });
+topNInput.addEventListener("change", () => {
+    const v = Math.min(Math.max(parseInt(topNInput.value) || 1, 1), 10);
+    topNInput.value = v; topNEl.value = v;
+});
+tempEl.addEventListener("input", () => { tempInput.value = tempEl.value; });
+tempInput.addEventListener("input", () => { tempEl.value = Math.min(Math.max(parseFloat(tempInput.value) || 0, 0), 1); });
+tempInput.addEventListener("change", () => {
+    const v = Math.round(Math.min(Math.max(parseFloat(tempInput.value) || 0, 0), 1) * 10) / 10;
+    tempInput.value = v; tempEl.value = v;
+});
+
+// Dirty-state tracking
+let isDirty = false;
+let isSaving = false;
+
+function markDirty() { isDirty = true; }
+function markClean() { isDirty = false; }
+
+window.addEventListener("beforeunload", e => {
+    if (isDirty && !isSaving) {
+        e.preventDefault();
+        e.returnValue = "";
+    }
+});
+
+// Back link — intercept if dirty
+document.querySelector(".settings-back-link").addEventListener("click", e => {
+    if (isDirty && !isSaving) {
+        e.preventDefault();
+        if (confirm("You have unsaved changes. Leave without saving?")) {
+            markClean();
+            window.location.href = e.currentTarget.href;
+        }
+    }
+});
+
+// Load settings
+const fields = [promptEl, topNEl, topNInput, tempEl, tempInput, simEl];
+fields.forEach(f => f.disabled = true);
+
+fetch(`/api/v1/workspaces/${workspaceId}/settings`)
+    .then(res => { if (!res.ok) throw new Error(`${res.status}`); return res.json(); })
+    .then(data => {
+        promptEl.value = data.prompt || "";
+        topNEl.value = data.top_n ?? 4;
+        topNInput.value = topNEl.value;
+        tempEl.value = data.temperature ?? 0.7;
+        tempInput.value = tempEl.value;
+        const raw = data.similarity_threshold ?? 0.25;
+        const closest = [0, 0.25, 0.5, 0.75].reduce((p, c) => Math.abs(c - raw) < Math.abs(p - raw) ? c : p);
+        simEl.value = String(closest);
+    })
+    .catch(err => { promptEl.placeholder = "Failed to load settings"; console.error(err); })
+    .finally(() => {
+        fields.forEach(f => f.disabled = false);
+        promptEl.placeholder = "Enter a system prompt for this workspace...";
+        // Start tracking changes only after load completes
+        fields.forEach(f => f.addEventListener("input", markDirty));
+        fields.forEach(f => f.addEventListener("change", markDirty));
+    });
+
+// Save
+async function doSave(btn) {
+    isSaving = true;
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+    try {
+        const res = await fetch(`/api/v1/workspaces/${workspaceId}/settings`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                prompt: promptEl.value,
+                top_n: parseInt(topNEl.value) || 4,
+                temperature: parseFloat(tempEl.value) || 0.7,
+                similarity_threshold: parseFloat(simEl.value),
+            }),
+        });
+        if (!res.ok) throw new Error(`${res.status}`);
+        markClean();
+        btn.textContent = "Saved!";
+        setTimeout(() => { window.location.href = `/${workspaceId}`; }, 500);
+    } catch (err) {
+        console.error(err);
+        isSaving = false;
+        btn.textContent = "Save Failed";
+        btn.style.backgroundColor = "#b91c1c";
+        btn.style.color = "#fff";
+        setTimeout(() => {
+            btn.textContent = "Save Settings";
+            btn.style.backgroundColor = "";
+            btn.style.color = "";
+            btn.disabled = false;
+        }, 2000);
+    }
+}
+
+saveBtn.addEventListener("click", () => doSave(saveBtn));
+</script>
+</body>
+</html>
