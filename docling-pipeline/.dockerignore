@@ -1,0 +1,7 @@
+samples/
+events/
+scripts/
+*.md
+.git
+__pycache__
+.localstack

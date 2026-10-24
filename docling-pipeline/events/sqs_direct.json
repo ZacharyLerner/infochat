@@ -1,0 +1,15 @@
+{
+  "Records": [
+    {
+      "messageId": "11111111-1111-1111-1111-111111111111",
+      "receiptHandle": "local",
+      "body": "{\"bucket\": \"docling-input\", \"key\": \"samples/sample.html\", \"output_key\": \"markdown/direct/sample.md\"}",
+      "attributes": {},
+      "messageAttributes": {},
+      "md5OfBody": "",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:us-east-1:000000000000:docling-jobs",
+      "awsRegion": "us-east-1"
+    }
+  ]
+}

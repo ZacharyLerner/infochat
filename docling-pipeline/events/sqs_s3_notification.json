@@ -1,0 +1,15 @@
+{
+  "Records": [
+    {
+      "messageId": "22222222-2222-2222-2222-222222222222",
+      "receiptHandle": "local",
+      "body": "{\"Records\": [{\"eventSource\": \"aws:s3\", \"eventName\": \"ObjectCreated:Put\", \"s3\": {\"bucket\": {\"name\": \"docling-input\"}, \"object\": {\"key\": \"samples/sample.html\"}}}]}",
+      "attributes": {},
+      "messageAttributes": {},
+      "md5OfBody": "",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:us-east-1:000000000000:docling-jobs",
+      "awsRegion": "us-east-1"
+    }
+  ]
+}

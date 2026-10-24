@@ -1,0 +1,55 @@
+# Local end-to-end environment:
+#   upload to s3://docling-input  ->  S3 notification  ->  SQS docling-jobs
+#   -> sqs-poller (stands in for Lambda's SQS event source mapping)
+#   -> docling-lambda (Lambda Runtime Interface Emulator on :9000)
+#   -> s3://docling-output/converted/<name>.docling.json  +  result message on SQS docling-results
+services:
+  localstack:
+    image: localstack/localstack:4
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3,sqs
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      # passes once ready.d/init.sh has finished
+      test: ["CMD-SHELL", "curl -sf localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      interval: 3s
+      retries: 30
+
+  docling-lambda:
+    build: .
+    image: docling-lambda:latest
+    ports:
+      - "9000:8080"
+    environment: &aws
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      OUTPUT_BUCKET: docling-output
+      OUTPUT_PREFIX: converted/
+      RESULT_QUEUE_URL: http://localstack:4566/000000000000/docling-results
+      AWS_LAMBDA_FUNCTION_TIMEOUT: "900"
+      AWS_LAMBDA_FUNCTION_MEMORY_SIZE: "8192"
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  sqs-poller:
+    image: docling-lambda:latest
+    entrypoint: ["python", "/poller/sqs_poller.py"]
+    environment:
+      <<: *aws
+      QUEUE_URL: http://localstack:4566/000000000000/docling-jobs
+      LAMBDA_URL: http://docling-lambda:8080/2015-03-31/functions/function/invocations
+    volumes:
+      - ./scripts/sqs_poller.py:/poller/sqs_poller.py:ro
+    depends_on:
+      localstack:
+        condition: service_healthy
+      docling-lambda:
+        condition: service_started

@@ -1,0 +1,10 @@
+docling==2.133.0
+# rapidocr 3.10.0 dropped PP_OCRV6_LANGS, which docling 2.133.0 imports; the model
+# download step (and OCR) fails with it. 3.9.2 is the last release before 3.10.0.
+rapidocr==3.9.2
+# llm-backend only loads documents whose schema version is <= its own docling-core's,
+# so the schema written here must only change on purpose (schema 1.10.0).
+docling-core==2.104.0
+boto3==1.42.97
+# scraped-page cleanup (same as the uploader); docling already pulls this version
+beautifulsoup4==4.15.0
