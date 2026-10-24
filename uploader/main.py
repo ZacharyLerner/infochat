@@ -3,19 +3,16 @@ import hashlib
 import io
 import json
 import re
-import subprocess
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy.orm import Session
 
 from anythingllm import (
     LLM_workspace_exists,
@@ -25,12 +22,8 @@ from anythingllm import (
     LLM_update_workspace_settings,
     LLM_delete_workspace,
 )
-from config import API_URL, HEADERS, APP_API_KEY
-import requests as _requests
-from config import TEXT_EXTENSIONS, DEBUG_UPLOAD_DIR, MAX_UPLOAD_BYTES
-from database import Base, engine, get_db
-from decling_conversion import convert_file, docling_filename, scrape_website, DOCLING_SUFFIX
-from models import Workspace, File as FileModel, ScrapeJob
+from config import APP_API_KEY, TEXT_EXTENSIONS, MAX_UPLOAD_BYTES
+from decling_conversion import docling_filename, fetch_page, DOCLING_SUFFIX
 from schemas import (
     FileResponse,
     FileCreate,
@@ -42,29 +35,11 @@ from schemas import (
     ScrapeJobResponse,
 )
 from scraper import get_links_by_depth, get_links_by_prefix
+import conversion
+import store
+from config import DOCLING_RESULTS_QUEUE_URL
 
 NY = ZoneInfo("America/New_York")
-
-# DB Setup
-Base.metadata.create_all(bind=engine)
-
-# Lightweight migrations for columns added after initial schema
-from sqlalchemy import inspect as sa_inspect, text
-
-with engine.connect() as conn:
-    file_cols = [c["name"] for c in sa_inspect(engine).get_columns("files")]
-    if "source_url" not in file_cols:
-        conn.execute(text("ALTER TABLE files ADD COLUMN source_url VARCHAR"))
-    if "scrape_job_id" not in file_cols:
-        conn.execute(text("ALTER TABLE files ADD COLUMN scrape_job_id VARCHAR"))
-    if "content_hash" not in file_cols:
-        conn.execute(text("ALTER TABLE files ADD COLUMN content_hash VARCHAR"))
-    if "last_checked_at" not in file_cols:
-        conn.execute(text("ALTER TABLE files ADD COLUMN last_checked_at DATETIME"))
-    job_cols = [c["name"] for c in sa_inspect(engine).get_columns("scrape_jobs")]
-    if "urls" not in job_cols:
-        conn.execute(text("ALTER TABLE scrape_jobs ADD COLUMN urls JSON"))
-    conn.commit()
 
 # App Setup
 app = FastAPI()
@@ -75,16 +50,27 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 SEM = asyncio.Semaphore(10)
 DELETE_SEM = asyncio.Semaphore(5)
 
-# ---------------------------------------------------------------------------
-# Scheduler
-# ---------------------------------------------------------------------------
+# Scheduled runs started by /api/v1/scrape/run-due (and the results consumer); held so they
+# aren't garbage-collected mid-run.
+_background_runs: set[asyncio.Task] = set()
 
-scheduler = AsyncIOScheduler()
 
+@app.on_event("startup")
+async def start_results_consumer():
+    """Apply docling-pipeline results (see conversion.py) on this server."""
+    if DOCLING_RESULTS_QUEUE_URL:
+        task = asyncio.create_task(conversion.consume_results())
+        _background_runs.add(task)
+
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+# Due jobs are started by scheduler.py (run on one host) calling
+# POST /api/v1/scrape/run-due, so uploader servers don't each run a scheduler.
 
 def _compute_next_run(interval: str | None, from_time=None):
     """Return a datetime for the next scheduled run, or None if manual."""
-    from datetime import datetime
     if not interval:
         return None
     if from_time is None:
@@ -98,199 +84,33 @@ def _compute_next_run(interval: str | None, from_time=None):
     return (from_time + delta) if delta else None
 
 
+def _next_run_iso(job: dict, from_iso: str) -> str | None:
+    next_run = _compute_next_run(job.get("schedule_interval"), datetime.fromisoformat(from_iso))
+    return next_run.isoformat() if next_run else None
+
+
 async def _discover_job_urls(job):
     """Return the list of URLs a job should scrape, according to its mode."""
-    if job.mode == "single":
-        return [job.base_url]
-    if job.mode == "list":
-        return list(job.urls or [])
-    if job.mode == "prefix":
-        parsed_path = urlparse(job.base_url).path or "/"
+    if job["mode"] == "single":
+        return [job["base_url"]]
+    if job["mode"] == "list":
+        return list(job.get("urls") or [])
+    if job["mode"] == "prefix":
+        parsed_path = urlparse(job["base_url"]).path or "/"
         if not parsed_path.endswith("/"):
             parsed_path = parsed_path.rsplit("/", 1)[0] + "/"
         return await get_links_by_prefix(
-            job.base_url,
+            job["base_url"],
             prefixes=[parsed_path],
-            allow_offsite=job.allow_offsite,
-            max_pages=job.max_pages,
+            allow_offsite=job["allow_offsite"],
+            max_pages=job["max_pages"],
         )
     return await get_links_by_depth(
-        job.base_url,
-        max_depth=job.max_depth,
-        allow_offsite=job.allow_offsite,
-        max_pages=job.max_pages,
+        job["base_url"],
+        max_depth=job["max_depth"],
+        allow_offsite=job["allow_offsite"],
+        max_pages=job["max_pages"],
     )
-
-
-async def _run_scrape_job_background(job_id: str):
-    """Background task: run a scrape job by ID, updating DB directly."""
-    from database import SessionLocal
-    from datetime import datetime
-
-    db = SessionLocal()
-    try:
-        job = db.query(ScrapeJob).filter(ScrapeJob.id == job_id).first()
-        if not job or job.is_running:
-            return
-
-        job.is_running = True
-        db.commit()
-
-        try:
-            # Re-discover URLs
-            urls = await _discover_job_urls(job)
-
-            url_set = set(urls)
-
-            # Existing files for this job
-            existing_files = {
-                f.source_url: f
-                for f in db.query(FileModel).filter(FileModel.scrape_job_id == job_id).all()
-                if f.source_url
-            }
-
-            # Remove pages no longer in the crawl
-            for source_url, file_rec in list(existing_files.items()):
-                if source_url not in url_set:
-                    await asyncio.to_thread(
-                        LLM_remove_document, job.workspace_id, file_rec.id
-                    )
-                    _delete_debug_file(job.workspace_id, file_rec.filename)
-                    db.delete(file_rec)
-            db.commit()
-
-            # Process each discovered URL
-            queue = asyncio.Queue()
-            completed = []
-
-            async def run_all():
-                coros = [
-                    _process_job_url(url, job, existing_files, queue)
-                    for url in urls
-                ]
-                await asyncio.gather(*coros, return_exceptions=True)
-                await queue.put(None)
-
-            task = asyncio.create_task(run_all())
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                if event.get("_file_record"):
-                    completed.append(event["_file_record"])
-
-            # Persist completed records
-            for rec in completed:
-                db.merge(rec)
-            db.commit()
-            await task
-
-        finally:
-            from datetime import datetime
-            job.is_running = False
-            job.last_scraped_at = datetime.now(NY)
-            job.next_scrape_at = _compute_next_run(job.schedule_interval, job.last_scraped_at)
-            db.commit()
-
-    except Exception as e:
-        print(f"[scheduler] error running job {job_id}: {e}")
-    finally:
-        db.close()
-
-
-async def _process_job_url(url, job, existing_files, queue):
-    """Scrape a single URL for a background job run; push result to queue."""
-    async with SEM:
-        from datetime import datetime
-        try:
-            doc_json = await asyncio.to_thread(scrape_website, url)
-            new_hash = hashlib.sha256(doc_json.encode()).hexdigest()
-
-            existing = existing_files.get(url)
-
-            if existing and existing.content_hash == new_hash:
-                # Unchanged — just update last_checked_at
-                existing.last_checked_at = datetime.now(NY)
-                await queue.put({"url": url, "status": "unchanged", "_file_record": existing})
-                return
-
-            filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
-            llm_file = io.StringIO(doc_json)
-            llm_file.name = filename
-
-            if DEBUG_UPLOAD_DIR:
-                debug_path = Path(DEBUG_UPLOAD_DIR) / job.workspace_id / filename
-                debug_path.parent.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(debug_path.write_text, llm_file.getvalue())
-
-            file_location = await asyncio.to_thread(
-                LLM_upload_document, llm_file, filename, job.workspace_id
-            )
-
-            if existing:
-                # Changed — delete old, record will be updated via merge
-                await asyncio.to_thread(
-                    LLM_remove_document, job.workspace_id, existing.id
-                )
-                if existing.filename != filename:
-                    _delete_debug_file(job.workspace_id, existing.filename)
-                existing.id = file_location
-                existing.filename = filename
-                existing.content_hash = new_hash
-                existing.last_checked_at = datetime.now(NY)
-                await queue.put({"url": url, "status": "changed", "_file_record": existing})
-            else:
-                # New page
-                rec = FileModel(
-                    id=file_location,
-                    filename=filename,
-                    original_extension=".html",
-                    workspace_id=job.workspace_id,
-                    category=f"scrape_{job.name}",
-                    source_url=url,
-                    scrape_job_id=job.id,
-                    content_hash=new_hash,
-                    last_checked_at=datetime.now(NY),
-                )
-                await queue.put({"url": url, "status": "new", "_file_record": rec})
-
-        except Exception as e:
-            print(f"[job] error processing {url}: {e}")
-            await queue.put({"url": url, "status": "error", "message": str(e)})
-
-
-async def _check_due_jobs():
-    """APScheduler job: find all jobs that are due and run them."""
-    from datetime import datetime
-    from database import SessionLocal
-    db = SessionLocal()
-    try:
-        now = datetime.now(NY)
-        due_jobs = (
-            db.query(ScrapeJob)
-            .filter(ScrapeJob.next_scrape_at <= now)
-            .filter(ScrapeJob.is_running == False)
-            .all()
-        )
-        for job in due_jobs:
-            print(f"[scheduler] triggering job {job.id} ({job.name})")
-            asyncio.create_task(_run_scrape_job_background(job.id))
-    except Exception as e:
-        print(f"[scheduler] error checking due jobs: {e}")
-    finally:
-        db.close()
-
-
-@app.on_event("startup")
-async def start_scheduler():
-    scheduler.add_job(_check_due_jobs, "interval", minutes=1, id="check_due_jobs")
-    scheduler.start()
-    print("[scheduler] started, checking every 60 seconds")
-
-
-@app.on_event("shutdown")
-async def stop_scheduler():
-    scheduler.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +130,7 @@ def _sanitize_url_to_filename(url: str) -> str:
 MAX_LIST_URLS = 1000
 
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
-_LIST_MARKER_RE = re.compile(r"^(?:\d+[.)]|[-*\u2022])$")
+_LIST_MARKER_RE = re.compile(r"^(?:\d+[.)]|[-*•])$")
 _WRAPPING_CHARS = "<>\"'`[]()"
 _TRAILING_PUNCT = ".,;:!?"
 
@@ -392,24 +212,8 @@ def _parse_url_list(raw) -> tuple[list[str], list[str], int]:
     return valid, invalid, duplicates
 
 
-def _job_to_dict(job, page_count: int = 0) -> dict:
-    return {
-        "id": job.id,
-        "workspace_id": job.workspace_id,
-        "name": job.name,
-        "base_url": job.base_url,
-        "mode": job.mode,
-        "urls": job.urls,
-        "max_depth": job.max_depth,
-        "max_pages": job.max_pages,
-        "allow_offsite": job.allow_offsite,
-        "schedule_interval": job.schedule_interval,
-        "last_scraped_at": job.last_scraped_at.isoformat() if job.last_scraped_at else None,
-        "next_scrape_at": job.next_scrape_at.isoformat() if job.next_scrape_at else None,
-        "is_running": bool(job.is_running),
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "page_count": page_count,
-    }
+def _job_to_dict(job: dict, page_count: int = 0) -> dict:
+    return {**job, "is_running": store.is_running(job), "page_count": page_count}
 
 
 def _require_url_list(raw) -> list[str]:
@@ -427,47 +231,124 @@ def _require_url_list(raw) -> list[str]:
     return urls
 
 
+def _require_workspace(workspace_id: str) -> dict:
+    workspace = store.get_workspace(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return workspace
+
+
+def _require_job(workspace_id: str, job_id: str) -> dict:
+    job = store.get_job(workspace_id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Scrape job not found")
+    return job
+
+
+def _require_api_key(request: Request) -> None:
+    if APP_API_KEY and request.headers.get("X-API-Key") != APP_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _new_file_record(workspace_id: str, **fields) -> dict:
+    return {
+        "key": uuid.uuid4().hex,
+        "id": None,
+        "workspace_id": workspace_id,
+        "category": "uploaded_file",
+        "status": "ready",
+        "error": None,
+        "original_extension": None,
+        "source_url": None,
+        "scrape_job_id": None,
+        "content_hash": None,
+        "last_checked_at": None,
+        "uploaded_at": store.now(),
+        "original": None,
+        "converted": None,
+        **fields,
+    }
+
+
+def _upsert_by_key(files: list[dict], records: list[dict]) -> list[dict]:
+    """Replace records with the same key, append the rest."""
+    by_key = {r["key"]: r for r in records}
+    present = {f["key"] for f in files}
+    return [by_key.get(f["key"], f) for f in files] + [r for r in records if r["key"] not in present]
+
+
+def _with_datetimes(record: dict, *fields) -> dict:
+    """Copy of record with ISO strings parsed, for templates that call .strftime()."""
+    return {**record, **{f: datetime.fromisoformat(record[f]) for f in fields if record.get(f)}}
+
+
+def _is_text(name: str) -> bool:
+    """Plain-text files (incl. ready-made .docling.json) are embedded as-is, not converted."""
+    return Path(name).suffix.lower() in TEXT_EXTENSIONS
+
+
+async def _add_document(workspace_id: str, filename: str, content: bytes) -> dict:
+    """Store an uploaded file and get it embedded; returns its new record.
+
+    Text files are already in their final form: they are stored as the record's
+    converted document and embedded right away. Everything else is stored as an
+    original for docling-pipeline to convert: the record stays "converting" (no
+    doc id yet) until conversion.handle_result embeds the result and deletes the
+    original. Only converted documents are kept.
+    """
+    record = _new_file_record(workspace_id, filename=filename, original_extension=Path(filename).suffix.lower())
+    text = _is_text(filename)
+    field, path = ("converted", store.converted_key) if text else ("original", store.original_key)
+    record[field] = path(workspace_id, record["key"], filename)
+    await asyncio.to_thread(store.put_object, record[field], content)
+    try:
+        if text:
+            record["id"] = await asyncio.to_thread(
+                LLM_upload_document, io.StringIO(content.decode("utf-8")), filename, workspace_id
+            )
+        else:
+            record["status"] = "converting"
+            await asyncio.to_thread(conversion.send_job, record, docling_filename(filename))
+    except Exception:
+        await asyncio.to_thread(store.delete_objects, [record[field]])
+        raise
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Web UI Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/{workspace_id}", include_in_schema=False, name="home")
-async def home(request: Request, workspace_id: str, db: Session = Depends(get_db)):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+async def home(request: Request, workspace_id: str):
+    workspace = _require_workspace(workspace_id)
+    files = store.list_files(workspace_id)
 
-    uploaded_files = (
-        db.query(FileModel)
-        .filter(FileModel.workspace_id == workspace_id)
-        .filter(~FileModel.category.like("scrape_%"))
-        .all()
-    )
+    # Newest first, matching the sort menu's default
+    uploaded_files = [
+        _with_datetimes(f, "uploaded_at")
+        for f in sorted(files, key=lambda f: f["uploaded_at"], reverse=True)
+        if not f["category"].startswith("scrape_")
+    ]
 
     # Collect distinct file extensions present in this workspace (uploaded only)
     extensions = sorted(
         {
-            (f.original_extension or Path(f.filename).suffix).lower()
+            (f["original_extension"] or Path(f["filename"]).suffix).lower()
             for f in uploaded_files
-            if (f.original_extension or Path(f.filename).suffix)
+            if (f["original_extension"] or Path(f["filename"]).suffix)
         }
     )
 
-    # Scrape jobs for this workspace, with page counts attached
-    scrape_jobs = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.workspace_id == workspace_id)
-        .order_by(ScrapeJob.created_at.desc())
-        .all()
-    )
-
-    # Attach page count to each job for the template
-    for job in scrape_jobs:
-        job.page_count = (
-            db.query(FileModel)
-            .filter(FileModel.scrape_job_id == job.id)
-            .count()
-        )
+    # Scrape jobs for this workspace, newest first, with page counts attached
+    page_counts = {}
+    for f in files:
+        if f.get("scrape_job_id"):
+            page_counts[f["scrape_job_id"]] = page_counts.get(f["scrape_job_id"], 0) + 1
+    scrape_jobs = [
+        _with_datetimes(_job_to_dict(job, page_counts.get(job["id"], 0)), "last_scraped_at", "next_scrape_at")
+        for job in sorted(store.list_jobs(workspace_id), key=lambda j: j["created_at"], reverse=True)
+    ]
 
     return templates.TemplateResponse(
         request,
@@ -490,36 +371,20 @@ async def processes_file(content, fname, workspace_id, queue):
     async with SEM:
         try:
             await queue.put({"file": fname, "status": "uploaded"})
-            file_extension = Path(fname).suffix.lower()
-            original_ext = file_extension
-            file_name = fname
-
-            if file_extension not in TEXT_EXTENSIONS:
-                await queue.put({"file": fname, "status": "converted"})
-                doc_json = await asyncio.to_thread(convert_file, content, fname)
-                LLM_File = io.StringIO(doc_json)
-                LLM_File.name = docling_filename(fname)
-            else:
-                LLM_File = io.StringIO(content.decode("utf-8"))
-                LLM_File.name = fname
-
-            if DEBUG_UPLOAD_DIR:
-                debug_path = Path(DEBUG_UPLOAD_DIR) / workspace_id / LLM_File.name
-                debug_path.parent.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(debug_path.write_text, LLM_File.getvalue())
-
-            await queue.put({"file": fname, "status": "embedded"})
-            file_location = await asyncio.to_thread(
-                LLM_upload_document, LLM_File, LLM_File.name, workspace_id
-            )
-
+            if not _is_text(fname):
+                await queue.put({"file": fname, "status": "queued"})
+            record = await _add_document(workspace_id, fname, content)
             await queue.put(
                 {
                     "file": fname,
                     "status": "done",
-                    "location": file_location,
-                    "name": file_name,
-                    "original_extension": original_ext,
+                    # Documents still converting have no doc id yet; the UI addresses them by key.
+                    "location": record["id"] or record["key"],
+                    "converting": record["status"] == "converting",
+                    "key": record["key"],
+                    "name": fname,
+                    "original_extension": record["original_extension"],
+                    "_file_record": record,
                 }
             )
         except Exception as e:
@@ -533,9 +398,9 @@ async def processes_file(content, fname, workspace_id, queue):
             )
 
 
-async def _stream_upload_progress(file_data, workspace_id, db):
+async def _stream_upload_progress(file_data, workspace_id):
     queue = asyncio.Queue()
-    completed_files = []
+    completed_records = []
     valid_files = []
     rejected_events = []
 
@@ -569,21 +434,12 @@ async def _stream_upload_progress(file_data, workspace_id, db):
         event = await queue.get()
         if event is None:
             break
-        if event["status"] == "done":
-            completed_files.append(event)
+        record = event.pop("_file_record", None)
+        if record is not None:
+            completed_records.append(record)
         yield f"data: {json.dumps(event)}\n\n"
 
-    for f in completed_files:
-        db.add(
-            FileModel(
-                id=f["location"],
-                filename=f["name"],
-                original_extension=f.get("original_extension", ""),
-                workspace_id=workspace_id,
-                category="uploaded_file",
-            )
-        )
-    db.commit()
+    await asyncio.to_thread(store.add_files, workspace_id, completed_records)
 
     yield "data: [DONE]\n\n"
     await task
@@ -593,16 +449,13 @@ async def _stream_upload_progress(file_data, workspace_id, db):
 async def create_upload_files(
     workspace_id: str,
     uploaded_files: list[UploadFile] = File(...),
-    db: Session = Depends(get_db),
 ):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _require_workspace(workspace_id)
 
     file_data = [(await f.read(), f.filename) for f in uploaded_files]
 
     return StreamingResponse(
-        _stream_upload_progress(file_data, workspace_id, db),
+        _stream_upload_progress(file_data, workspace_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
@@ -612,90 +465,67 @@ async def create_upload_files(
 # Delete endpoints
 # ---------------------------------------------------------------------------
 
-def _debug_filenames(original_filename: str) -> list[str]:
-    """Return the names the file may have been written to debug_uploads under.
-
-    Text-extension files are stored under their original name; all other
-    files are converted to DoclingDocument JSON and stored with a .docling.json
-    suffix, or with a .md suffix if they were uploaded before the switch to Docling.
-    """
-    if Path(original_filename).suffix.lower() in TEXT_EXTENSIONS:
-        return [original_filename]
-    return [docling_filename(original_filename), Path(original_filename).with_suffix(".md").name]
-
-
-def _delete_debug_file(workspace_id: str, filename: str) -> None:
-    """Remove the cached debug copy from debug_uploads if it exists.
-
-    `filename` should be the *original* filename as stored in FileModel.filename;
-    this function resolves the correct on-disk name automatically.
-    """
-    if not DEBUG_UPLOAD_DIR:
-        return
-    for name in _debug_filenames(filename):
-        debug_path = Path(DEBUG_UPLOAD_DIR) / workspace_id / name
-        try:
-            debug_path.unlink(missing_ok=True)
-        except Exception as e:
-            print(f"[debug] failed to remove debug file {debug_path}: {e}")
-
-
 async def _delete_file(file_id, workspace_id):
     async with DELETE_SEM:
         success = await asyncio.to_thread(LLM_remove_document, workspace_id, file_id)
         return file_id, success
 
 
-@app.delete("/delete/{file_id:path}", include_in_schema=False)
-async def delete_uploaded_file(file_id: str, db: Session = Depends(get_db)):
-    file_to_delete = db.query(FileModel).where(FileModel.id == file_id).first()
-    if not file_to_delete:
+def _find_file(workspace_id: str, file_id: str) -> dict | None:
+    """A record by doc id, or by stable key for a document that is still converting."""
+    return next((f for f in store.list_files(workspace_id) if file_id in (f["id"], f["key"])), None)
+
+
+@app.delete("/{workspace_id}/delete/{file_id:path}", include_in_schema=False)
+async def delete_uploaded_file(workspace_id: str, file_id: str):
+    record = _find_file(workspace_id, file_id)
+    if not record:
         raise HTTPException(status_code=404, detail="File not found")
 
-    success = LLM_remove_document(file_to_delete.workspace_id, file_id)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to delete from LLM")
+    if record["id"]:
+        success = await asyncio.to_thread(LLM_remove_document, workspace_id, record["id"])
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete from LLM")
 
-    _delete_debug_file(file_to_delete.workspace_id, file_to_delete.filename)
-    db.delete(file_to_delete)
-    db.commit()
+    await asyncio.to_thread(store.remove_files, workspace_id, [record["key"]])
     return {"deleted": file_id}
 
 
-@app.post("/delete-bulk", include_in_schema=False)
-async def delete_bulk_files(request: Request, db: Session = Depends(get_db)):
+@app.post("/{workspace_id}/delete-bulk", include_in_schema=False)
+async def delete_bulk_files(workspace_id: str, request: Request):
     body = await request.json()
     file_ids = body.get("file_ids", [])
 
-    files = {
-        f.id: f for f in db.query(FileModel).filter(FileModel.id.in_(file_ids)).all()
-    }
+    records = {}
+    for f in store.list_files(workspace_id):
+        for fid in (f["id"], f["key"]):
+            if fid in file_ids:
+                records[fid] = f
+    found = [fid for fid in file_ids if fid in records]
 
-    print(f"[bulk-delete] received {len(file_ids)} id(s), {len(files)} found in DB")
-    if len(file_ids) != len(files):
-        missing = set(file_ids) - set(files)
-        print(f"[bulk-delete] {len(missing)} id(s) not in DB (will be skipped): {list(missing)[:5]}")
+    print(f"[bulk-delete] received {len(file_ids)} id(s), {len(found)} found in workspace")
+    if len(file_ids) != len(found):
+        missing = set(file_ids) - set(records)
+        print(f"[bulk-delete] {len(missing)} id(s) not in workspace (will be skipped): {list(missing)[:5]}")
 
+    embedded = [fid for fid in found if records[fid]["id"] == fid]
     results = await asyncio.gather(
-        *[_delete_file(fid, files[fid].workspace_id) for fid in files],
+        *[_delete_file(fid, workspace_id) for fid in embedded],
         return_exceptions=True,
     )
-    deleted = []
+    deleted = [fid for fid in found if records[fid]["id"] != fid]  # still converting: nothing to remove upstream
     for r in results:
         if isinstance(r, Exception):
             print(f"[bulk-delete] exception during delete: {r}")
             continue
         file_id, success = r
         if success:
-            f_rec = files[file_id]
-            _delete_debug_file(f_rec.workspace_id, f_rec.filename)
-            db.delete(f_rec)
             deleted.append(file_id)
         else:
             print(f"[bulk-delete] LLM_remove_document returned False for {file_id!r}")
 
-    db.commit()
-    print(f"[bulk-delete] done: {len(deleted)}/{len(files)} deleted successfully")
+    await asyncio.to_thread(store.remove_files, workspace_id, [records[fid]["key"] for fid in deleted])
+    print(f"[bulk-delete] done: {len(deleted)}/{len(found)} deleted successfully")
     return {"deleted": deleted}
 
 
@@ -712,10 +542,8 @@ async def fetch_workspace_settings(workspace_id: str):
 
 
 @app.get("/{workspace_id}/settings", include_in_schema=False, name="workspace_settings")
-async def workspace_settings_page(request: Request, workspace_id: str, db: Session = Depends(get_db)):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+async def workspace_settings_page(request: Request, workspace_id: str):
+    workspace = _require_workspace(workspace_id)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -739,10 +567,8 @@ async def save_workspace_settings(workspace_id: str, request: Request):
 # ---------------------------------------------------------------------------
 
 @app.post("/{workspace_id}/scrape/discover", include_in_schema=False)
-async def scrape_discover(workspace_id: str, request: Request, db: Session = Depends(get_db)):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+async def scrape_discover(workspace_id: str, request: Request):
+    _require_workspace(workspace_id)
 
     body = await request.json()
     mode = body.get("mode", "depth")
@@ -797,314 +623,225 @@ async def scrape_discover(workspace_id: str, request: Request, db: Session = Dep
 # Scrape Jobs CRUD
 # ---------------------------------------------------------------------------
 
+def _job_page_count(workspace_id: str, job_id: str) -> int:
+    return sum(1 for f in store.list_files(workspace_id) if f.get("scrape_job_id") == job_id)
+
+
 @app.get("/{workspace_id}/scrape/jobs", include_in_schema=False)
-async def list_scrape_jobs(workspace_id: str, db: Session = Depends(get_db)):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+async def list_scrape_jobs(workspace_id: str):
+    _require_workspace(workspace_id)
 
-    jobs = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.workspace_id == workspace_id)
-        .order_by(ScrapeJob.created_at.desc())
-        .all()
-    )
-
+    files = store.list_files(workspace_id)
+    jobs = sorted(store.list_jobs(workspace_id), key=lambda j: j["created_at"], reverse=True)
     return [
-        _job_to_dict(
-            job, db.query(FileModel).filter(FileModel.scrape_job_id == job.id).count()
-        )
+        _job_to_dict(job, sum(1 for f in files if f.get("scrape_job_id") == job["id"]))
         for job in jobs
     ]
 
 
 @app.get("/{workspace_id}/scrape/jobs/{job_id}/pages", include_in_schema=False)
-async def list_job_pages(workspace_id: str, job_id: str, db: Session = Depends(get_db)):
-    job = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.id == job_id, ScrapeJob.workspace_id == workspace_id)
-        .first()
-    )
-    if not job:
-        raise HTTPException(status_code=404, detail="Scrape job not found")
+async def list_job_pages(workspace_id: str, job_id: str):
+    _require_job(workspace_id, job_id)
 
-    files = (
-        db.query(FileModel)
-        .filter(FileModel.scrape_job_id == job_id)
-        .order_by(FileModel.uploaded_at.desc())
-        .all()
+    files = sorted(
+        (f for f in store.list_files(workspace_id) if f.get("scrape_job_id") == job_id),
+        key=lambda f: f["uploaded_at"],
+        reverse=True,
     )
 
     return [
         {
-            "id": f.id,
-            "filename": f.filename,
-            "source_url": f.source_url,
-            "last_checked_at": f.last_checked_at.isoformat() if f.last_checked_at else None,
-            "uploaded_at": f.uploaded_at.isoformat() if f.uploaded_at else None,
+            "id": f["id"],
+            "filename": f["filename"],
+            "source_url": f["source_url"],
+            "last_checked_at": f["last_checked_at"],
+            "uploaded_at": f["uploaded_at"],
         }
         for f in files
     ]
 
 
 @app.post("/{workspace_id}/scrape/jobs", include_in_schema=False)
-async def create_scrape_job(workspace_id: str, request: Request, db: Session = Depends(get_db)):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+async def create_scrape_job(workspace_id: str, request: Request):
+    _require_workspace(workspace_id)
 
     body = await request.json()
     mode = body.get("mode", "depth")
-    job = ScrapeJob(
-        id=str(uuid.uuid4()),
-        workspace_id=workspace_id,
-        name=body.get("name", "Untitled Job"),
-        base_url=body.get("base_url", ""),
-        mode=mode,
-        max_depth=int(body.get("max_depth", 2)),
-        max_pages=int(body.get("max_pages", 100)),
-        allow_offsite=bool(body.get("allow_offsite", False)),
-        schedule_interval=body.get("schedule_interval") or None,
-    )
+    job = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": workspace_id,
+        "name": body.get("name", "Untitled Job"),
+        "base_url": body.get("base_url", ""),
+        "mode": mode,
+        "urls": None,
+        "max_depth": int(body.get("max_depth", 2)),
+        "max_pages": int(body.get("max_pages", 100)),
+        "allow_offsite": bool(body.get("allow_offsite", False)),
+        "schedule_interval": body.get("schedule_interval") or None,
+        "last_scraped_at": None,
+        "next_scrape_at": None,
+        "is_running": False,
+        "run_started_at": None,
+        "created_at": store.now(),
+    }
 
     if mode == "list":
-        job.urls = _require_url_list(body.get("urls"))
-        job.base_url = job.urls[0]
-        job.max_depth = 0
-        job.max_pages = len(job.urls)
-        job.allow_offsite = True
+        job["urls"] = _require_url_list(body.get("urls"))
+        job["base_url"] = job["urls"][0]
+        job["max_depth"] = 0
+        job["max_pages"] = len(job["urls"])
+        job["allow_offsite"] = True
 
-    if job.schedule_interval:
-        from datetime import datetime
-        job.next_scrape_at = _compute_next_run(job.schedule_interval, datetime.now(NY))
+    if job["schedule_interval"]:
+        job["next_scrape_at"] = _next_run_iso(job, store.now())
 
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
+    store.add_job(workspace_id, job)
     return _job_to_dict(job)
 
 
 @app.patch("/{workspace_id}/scrape/jobs/{job_id}", include_in_schema=False)
-async def update_scrape_job(workspace_id: str, job_id: str, request: Request, db: Session = Depends(get_db)):
-    job = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.id == job_id, ScrapeJob.workspace_id == workspace_id)
-        .first()
-    )
-    if not job:
-        raise HTTPException(status_code=404, detail="Scrape job not found")
-
+async def update_scrape_job(workspace_id: str, job_id: str, request: Request):
+    job = _require_job(workspace_id, job_id)
     body = await request.json()
 
+    changes = {}
     if "name" in body and body["name"]:
-        job.name = body["name"]
+        changes["name"] = body["name"]
     if "base_url" in body and body["base_url"]:
-        job.base_url = body["base_url"]
+        changes["base_url"] = body["base_url"]
     if "mode" in body:
-        job.mode = body["mode"]
+        changes["mode"] = body["mode"]
     if "max_depth" in body:
-        job.max_depth = int(body["max_depth"])
+        changes["max_depth"] = int(body["max_depth"])
     if "max_pages" in body:
-        job.max_pages = int(body["max_pages"])
+        changes["max_pages"] = int(body["max_pages"])
     if "allow_offsite" in body:
-        job.allow_offsite = bool(body["allow_offsite"])
-    if "urls" in body or (job.mode == "list" and not job.urls):
-        job.urls = _require_url_list(body.get("urls"))
-        job.base_url = job.urls[0]
-        job.max_pages = len(job.urls)
+        changes["allow_offsite"] = bool(body["allow_offsite"])
+    if "urls" in body or (changes.get("mode", job["mode"]) == "list" and not job.get("urls")):
+        changes["urls"] = _require_url_list(body.get("urls"))
+        changes["base_url"] = changes["urls"][0]
+        changes["max_pages"] = len(changes["urls"])
 
     # Schedule change: recompute next_scrape_at
     if "schedule_interval" in body:
-        new_interval = body["schedule_interval"] or None
-        job.schedule_interval = new_interval
-        if new_interval:
-            from datetime import datetime
-            job.next_scrape_at = _compute_next_run(new_interval, datetime.now(NY))
-        else:
-            job.next_scrape_at = None
+        changes["schedule_interval"] = body["schedule_interval"] or None
+        changes["next_scrape_at"] = _next_run_iso(changes, store.now())
 
-    db.commit()
-    db.refresh(job)
-    page_count = db.query(FileModel).filter(FileModel.scrape_job_id == job.id).count()
-
-    return _job_to_dict(job, page_count)
+    job = store.update_job(workspace_id, job_id, lambda cur: {**cur, **changes})
+    if not job:
+        raise HTTPException(status_code=404, detail="Scrape job not found")
+    return _job_to_dict(job, _job_page_count(workspace_id, job_id))
 
 
 @app.delete("/{workspace_id}/scrape/jobs/{job_id}", include_in_schema=False)
-async def delete_scrape_job(workspace_id: str, job_id: str, db: Session = Depends(get_db)):
-    job = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.id == job_id, ScrapeJob.workspace_id == workspace_id)
-        .first()
-    )
-    if not job:
-        raise HTTPException(status_code=404, detail="Scrape job not found")
+async def delete_scrape_job(workspace_id: str, job_id: str):
+    _require_job(workspace_id, job_id)
 
     # Delete all files associated with this job from the RAG backend
-    files = db.query(FileModel).filter(FileModel.scrape_job_id == job_id).all()
-    file_map = {f.id: f for f in files}
+    files = [f for f in store.list_files(workspace_id) if f.get("scrape_job_id") == job_id]
     results = await asyncio.gather(
-        *[_delete_file(f.id, workspace_id) for f in files],
+        *[_delete_file(f["id"], workspace_id) for f in files if f["id"]],
         return_exceptions=True,
     )
     for r in results:
         if isinstance(r, Exception):
             print(f"[delete-job] exception during file delete: {r}")
-            continue
-        file_id, success = r
-        if success and file_id in file_map:
-            _delete_debug_file(workspace_id, file_map[file_id].filename)
 
-    db.delete(job)  # cascade deletes FileModel rows via ORM
-    db.commit()
+    await asyncio.to_thread(store.remove_files, workspace_id, [f["key"] for f in files])
+    store.delete_job(workspace_id, job_id)
     return {"deleted": job_id}
 
 
 # ---------------------------------------------------------------------------
-# Scrape Job: Run (SSE stream with smart change detection)
+# Scrape Job: Run (smart change detection)
 # ---------------------------------------------------------------------------
 
-async def _process_scraped_url_sse(url, job, existing_files, queue):
+async def _process_job_url(url, job, existing_files, queue):
     """
-    Process one URL for an SSE-streamed job run.
-    Detects new / changed / unchanged pages.
+    Fetch one URL for a job run, store the page as fetched as a temporary
+    original, and queue it for conversion. Whether the page changed is decided
+    when the result comes back (conversion.handle_result compares content hashes).
     """
     async with SEM:
-        from datetime import datetime
+        workspace_id = job["workspace_id"]
         try:
             await queue.put({"url": url, "status": "fetching"})
-
-            doc_json = await asyncio.to_thread(scrape_website, url)
-            new_hash = hashlib.sha256(doc_json.encode()).hexdigest()
-
-            await queue.put({"url": url, "status": "converted"})
-
-            existing = existing_files.get(url)
-
-            if existing and existing.content_hash == new_hash:
-                # Unchanged — skip upload
-                existing.last_checked_at = datetime.now(NY)
-                await queue.put({
-                    "url": url,
-                    "status": "unchanged",
-                    "name": existing.filename,
-                    "_file_record": existing,
-                })
-                return
+            content, content_type = await asyncio.to_thread(fetch_page, url)
 
             filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
-            llm_file = io.StringIO(doc_json)
-            llm_file.name = filename
-
-            if DEBUG_UPLOAD_DIR:
-                debug_path = Path(DEBUG_UPLOAD_DIR) / job.workspace_id / filename
-                debug_path.parent.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(debug_path.write_text, llm_file.getvalue())
-
-            file_location = await asyncio.to_thread(
-                LLM_upload_document, llm_file, filename, job.workspace_id
+            record = existing_files.get(url) or _new_file_record(
+                workspace_id,
+                filename=filename,
+                original_extension=".html",
+                category=f"scrape_{job['name']}",
+                source_url=url,
+                scrape_job_id=job["id"],
+                status="converting",
             )
+            # Each run gets its own original (deleted once converted), so an earlier run's
+            # result can't remove the page this run is about to convert.
+            original = store.original_key(
+                workspace_id, record["key"], f"{uuid.uuid4().hex[:8]}/{_sanitize_url_to_filename(url)}"
+            )
+            await asyncio.to_thread(store.put_object, original, content)
+            record = {**record, "original": original, "filename": filename}
+            await asyncio.to_thread(conversion.send_job, record, filename, scraped=True, content_type=content_type)
 
-            if existing:
-                # Changed — remove old from RAG, update record
-                await asyncio.to_thread(LLM_remove_document, job.workspace_id, existing.id)
-                if existing.filename != filename:
-                    _delete_debug_file(job.workspace_id, existing.filename)
-                existing.id = file_location
-                existing.filename = filename
-                existing.content_hash = new_hash
-                existing.last_checked_at = datetime.now(NY)
-                await queue.put({
-                    "url": url,
-                    "status": "changed",
-                    "location": file_location,
-                    "name": filename,
-                    "category": job.name,
-                    "_file_record": existing,
-                })
-            else:
-                # New page
-                rec = FileModel(
-                    id=file_location,
-                    filename=filename,
-                    original_extension=".html",
-                    workspace_id=job.workspace_id,
-                    category=f"scrape_{job.name}",
-                    source_url=url,
-                    scrape_job_id=job.id,
-                    content_hash=new_hash,
-                    last_checked_at=datetime.now(NY),
-                )
-                await queue.put({
-                    "url": url,
-                    "status": "new",
-                    "location": file_location,
-                    "name": filename,
-                    "category": job.name,
-                    "_file_record": rec,
-                })
+            await queue.put({
+                "url": url,
+                "status": "queued",
+                "name": filename,
+                "category": job["name"],
+                "_file_record": record,
+            })
 
         except Exception as e:
             print(f"[job-run] error processing {url}: {e}")
             await queue.put({"url": url, "status": "error", "message": str(e)})
 
 
-async def _stream_job_run(job_id: str, workspace_id: str, db: Session):
-    from datetime import datetime
+async def _job_run_events(job: dict):
+    """Run a job that was claimed with store.claim_job, yielding progress events.
 
-    job = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.id == job_id, ScrapeJob.workspace_id == workspace_id)
-        .first()
-    )
-    if not job:
-        yield f"data: {json.dumps({'status': 'error', 'message': 'Job not found'})}\n\n"
-        return
-
-    job.is_running = True
-    db.commit()
-
+    Shared by the streamed UI run and scheduled background runs; always
+    releases the job when it finishes.
+    """
+    workspace_id, job_id = job["workspace_id"], job["id"]
     try:
         # Re-discover URLs
-        yield f"data: {json.dumps({'status': 'discovering'})}\n\n"
+        yield {"status": "discovering"}
         try:
             urls = await _discover_job_urls(job)
         except Exception as e:
-            yield f"data: {json.dumps({'status': 'error', 'message': f'Discovery failed: {str(e)}'})}\n\n"
-            job.is_running = False
-            db.commit()
+            yield {"status": "error", "message": f"Discovery failed: {str(e)}"}
             return
 
         url_set = set(urls)
-        yield f"data: {json.dumps({'status': 'discovered', 'count': len(urls)})}\n\n"
+        yield {"status": "discovered", "count": len(urls)}
 
         # Existing files for this job
         existing_files = {
-            f.source_url: f
-            for f in db.query(FileModel).filter(FileModel.scrape_job_id == job_id).all()
-            if f.source_url
+            f["source_url"]: f
+            for f in store.list_files(workspace_id)
+            if f.get("scrape_job_id") == job_id and f.get("source_url")
         }
 
         # Remove pages no longer in the crawl
-        removed_count = 0
-        for source_url, file_rec in list(existing_files.items()):
-            if source_url not in url_set:
-                await asyncio.to_thread(LLM_remove_document, workspace_id, file_rec.id)
-                _delete_debug_file(workspace_id, file_rec.filename)
-                db.delete(file_rec)
-                removed_count += 1
-                yield f"data: {json.dumps({'url': source_url, 'status': 'removed'})}\n\n"
-        if removed_count:
-            db.commit()
+        stale = [f for source_url, f in existing_files.items() if source_url not in url_set]
+        for f in stale:
+            if f["id"]:
+                await asyncio.to_thread(LLM_remove_document, workspace_id, f["id"])
+            yield {"url": f["source_url"], "status": "removed"}
+        if stale:
+            await asyncio.to_thread(store.remove_files, workspace_id, [f["key"] for f in stale])
 
-        # Process each URL via SSE
+        # Process each URL
         queue = asyncio.Queue()
         file_records = []
 
         async def run_all():
             coros = [
-                _process_scraped_url_sse(url, job, existing_files, queue)
+                _process_job_url(url, job, existing_files, queue)
                 for url in urls
             ]
             await asyncio.gather(*coros, return_exceptions=True)
@@ -1120,52 +857,86 @@ async def _stream_job_run(job_id: str, workspace_id: str, db: Session):
             rec = event.pop("_file_record", None)
             if rec is not None:
                 file_records.append(rec)
-
-            # Don't stream internal unchanged events for now — just count them
-            if event.get("status") != "unchanged":
-                yield f"data: {json.dumps(event)}\n\n"
+            yield event
 
         # Persist all file records
-        for rec in file_records:
-            db.merge(rec)
-        db.commit()
-
+        await asyncio.to_thread(store.update_files, workspace_id, lambda files: _upsert_by_key(files, file_records))
         await task
 
     finally:
-        job.is_running = False
-        job.last_scraped_at = datetime.now(NY)
-        job.next_scrape_at = _compute_next_run(job.schedule_interval, job.last_scraped_at)
-        db.commit()
+        await asyncio.to_thread(store.release_job, workspace_id, job_id, _next_run_iso)
 
-    # Final summary
-    page_count = db.query(FileModel).filter(FileModel.scrape_job_id == job_id).count()
-    yield f"data: {json.dumps({'status': 'done', 'job_id': job_id, 'page_count': page_count})}\n\n"
+    yield {"status": "done", "job_id": job_id, "page_count": _job_page_count(workspace_id, job_id)}
+
+
+async def _stream_job_run(job: dict):
+    async for event in _job_run_events(job):
+        # Don't stream internal unchanged events for now
+        if event.get("status") != "unchanged":
+            yield f"data: {json.dumps(event)}\n\n"
     yield "data: [DONE]\n\n"
 
 
-@app.post("/{workspace_id}/scrape/jobs/{job_id}/run", include_in_schema=False)
-async def run_scrape_job(workspace_id: str, job_id: str, db: Session = Depends(get_db)):
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+async def _run_job_in_background(job: dict):
+    try:
+        async for event in _job_run_events(job):
+            if event.get("status") == "error" and "url" not in event:
+                print(f"[scheduler] job {job['id']} ({job['name']}): {event['message']}")
+    except Exception as e:
+        print(f"[scheduler] error running job {job['id']}: {e}")
 
-    job = (
-        db.query(ScrapeJob)
-        .filter(ScrapeJob.id == job_id, ScrapeJob.workspace_id == workspace_id)
-        .first()
-    )
+
+def _claim_or_raise(workspace_id: str, job_id: str) -> dict:
+    try:
+        job = store.claim_job(workspace_id, job_id)
+    except store.JobBusy:
+        raise HTTPException(status_code=409, detail="Job is already running")
     if not job:
         raise HTTPException(status_code=404, detail="Scrape job not found")
+    return job
 
-    if job.is_running:
-        raise HTTPException(status_code=409, detail="Job is already running")
+
+@app.post("/{workspace_id}/scrape/jobs/{job_id}/run", include_in_schema=False)
+async def run_scrape_job(workspace_id: str, job_id: str):
+    _require_workspace(workspace_id)
+    job = _claim_or_raise(workspace_id, job_id)
 
     return StreamingResponse(
-        _stream_job_run(job_id, workspace_id, db),
+        _stream_job_run(job),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+@app.post("/api/v1/scrape/run-due")
+async def run_due_scrape_jobs(request: Request):
+    """
+    Start every scheduled scrape job that is due, in the background on this server.
+
+    Called about once a minute by scheduler.py. Each job is claimed with a
+    conditional write first, so overlapping calls (or a user pressing Run)
+    can't start the same job twice. Requires X-API-Key when APP_API_KEY is configured.
+    """
+    _require_api_key(request)
+
+    now = datetime.fromisoformat(store.now())
+    started = []
+    for workspace_id in await asyncio.to_thread(store.list_workspace_slugs):
+        for job in await asyncio.to_thread(store.list_jobs, workspace_id):
+            due = job.get("next_scrape_at") and datetime.fromisoformat(job["next_scrape_at"]) <= now
+            if not due or store.is_running(job):
+                continue
+            try:
+                claimed = await asyncio.to_thread(store.claim_job, workspace_id, job["id"])
+            except store.JobBusy:
+                continue
+            if claimed:
+                print(f"[scheduler] triggering job {job['id']} ({job['name']})")
+                task = asyncio.create_task(_run_job_in_background(claimed))
+                _background_runs.add(task)
+                task.add_done_callback(_background_runs.discard)
+                started.append(job["id"])
+    return {"started": started}
 
 
 # ---------------------------------------------------------------------------
@@ -1176,26 +947,22 @@ async def run_scrape_job(workspace_id: str, job_id: str, db: Session = Depends(g
 async def upload_to_workspace(
     workspace_id: str,
     uploaded_files: list[UploadFile] = File(...),
-    db: Session = Depends(get_db),
 ):
     """
     Upload one or more files to a workspace.
 
-    Non-text files are converted to DoclingDocument JSON before being sent to the RAG backend.
-    Text files are uploaded as-is. Each file is registered in the local database
-    with its original extension preserved.
+    Text files are embedded right away. Other files are converted to DoclingDocument JSON
+    by docling-pipeline first: their records come back with status "converting" and no id,
+    and get one once conversion finishes. Only the converted documents are kept in S3.
 
     Raises **404** if the workspace does not exist, or **413** if any file exceeds
     the maximum upload size.
     """
-    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _require_workspace(workspace_id)
 
-    saved_files = []
-    for f in uploaded_files:
-        content = await f.read()
-
+    # Check every size before embedding anything, so a 413 leaves nothing half-uploaded.
+    contents = [await f.read() for f in uploaded_files]
+    for f, content in zip(uploaded_files, contents):
         if len(content) > MAX_UPLOAD_BYTES:
             size_mb = len(content) / (1024 * 1024)
             limit_mb = MAX_UPLOAD_BYTES / (1024 * 1024)
@@ -1204,269 +971,172 @@ async def upload_to_workspace(
                 detail=f"File '{f.filename}' is {size_mb:.1f} MB — exceeds {limit_mb:.0f} MB limit",
             )
 
-        file_extension = Path(f.filename).suffix.lower()
-        file_name = f.filename
+    saved_files = []
+    for f, content in zip(uploaded_files, contents):
+        saved_files.append(await _add_document(workspace_id, f.filename, content))
 
-        if file_extension not in TEXT_EXTENSIONS:
-            LLM_File = io.StringIO(convert_file(content, f.filename))
-            file_name = docling_filename(f.filename)
-        else:
-            LLM_File = io.StringIO(content.decode("utf-8"))
-
-        if DEBUG_UPLOAD_DIR:
-            debug_path = Path(DEBUG_UPLOAD_DIR) / workspace_id / file_name
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            debug_path.write_text(LLM_File.getvalue())
-            LLM_File.seek(0)
-
-        file_location = LLM_upload_document(LLM_File, file_name, workspace.id)
-
-        db_file = FileModel(
-            id=file_location,
-            filename=f.filename,
-            original_extension=file_extension.lower(),
-            workspace_id=workspace_id,
-            category="uploaded_file",
-        )
-        db.add(db_file)
-        saved_files.append(db_file)
-
-    db.commit()
-    for f in saved_files:
-        db.refresh(f)
+    await asyncio.to_thread(store.add_files, workspace_id, saved_files)
     return saved_files
 
 
 @app.post("/api/v1/workspaces/new")
-async def create_new_workspace(workspace: WorkspaceCreate, request: Request, db: Session = Depends(get_db)):
+async def create_new_workspace(workspace: WorkspaceCreate, request: Request):
     """
-    Register a workspace in the local database.
+    Register a workspace with the uploader.
 
-    Workspaces are created and managed externally in AnythingLLM. This endpoint
-    only records the workspace in the local database.
+    Workspaces are created and managed in the RAG backend. This endpoint
+    only records the workspace for the uploader.
 
-    - **id**: the workspace slug as it exists in AnythingLLM
+    - **id**: the workspace slug as it exists in the RAG backend
     - **name**: display name for the workspace
     - **owners**: list of owner user IDs
 
-    Raises **409** if a workspace with the given ID already exists in the database.
+    Raises **409** if a workspace with the given ID already exists.
     """
-    existing = db.query(Workspace).filter(Workspace.id == workspace.id).first()
-    if existing:
+    created = store.create_workspace(workspace.id, workspace.name, workspace.owners)
+    if not created:
         raise HTTPException(status_code=409, detail="Workspace already exists")
-
-    db_workspace = Workspace(id=workspace.id, name=workspace.name, owners=workspace.owners)
-    db.add(db_workspace)
-    db.commit()
-    db.refresh(db_workspace)
-    return db_workspace
+    return created
 
 
 @app.post("/api/v1/workspaces/db")
-async def create_new_workspace_DB_only(workspace: WorkspaceCreate, request: Request, db: Session = Depends(get_db)):
+async def create_new_workspace_DB_only(workspace: WorkspaceCreate, request: Request):
     """
-    Create a new workspace in the local database only (does not create it in the RAG backend).
+    Register a workspace with the uploader only (does not create it in the RAG backend).
 
     Use this endpoint when the workspace already exists in the RAG backend and you only need
-    to register it in the local database.
+    to register it with the uploader.
 
     - **id**: unique workspace identifier
     - **name**: display name for the workspace
     - **owners**: list of owner user IDs
 
-    Raises **409** if a workspace with the given ID already exists in the database.
+    Raises **409** if a workspace with the given ID already exists.
     """
-    existing = db.query(Workspace).filter(Workspace.id == workspace.id).first()
-    if existing:
+    created = store.create_workspace(workspace.id, workspace.name, workspace.owners)
+    if not created:
         raise HTTPException(status_code=409, detail="Workspace already exists")
-    else:
-        db_workspace = Workspace(id=workspace.id, name=workspace.name, owners=workspace.owners)
-        db.add(db_workspace)
-        db.commit()
-        db.refresh(db_workspace)
-        return db_workspace
+    return created
 
 
 @app.get("/api/v1/workspaces/{workspace_id}", response_model=WorkspaceResponse)
-async def get_workspace_info(workspace_id: str, request: Request, db: Session = Depends(get_db)):
+async def get_workspace_info(workspace_id: str, request: Request):
     """
     Retrieve a workspace by its ID, including its associated files.
 
     Raises **404** if no workspace with the given ID exists.
     """
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    return workspace
+    workspace = _require_workspace(workspace_id)
+    return {**workspace, "files": store.list_files(workspace_id)}
 
 
 @app.patch("/api/v1/workspaces/{workspace_id}")
-async def rename_workspace(workspace_id: str, body: WorkspaceUpdate, db: Session = Depends(get_db)):
+async def rename_workspace(workspace_id: str, body: WorkspaceUpdate):
     """
     Rename a workspace by its ID.
 
     Raises **404** if no workspace with the given ID exists.
     """
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
+    workspace = store.update_workspace(workspace_id, name=body.name)
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    workspace.name = body.name
-    db.commit()
-    db.refresh(workspace)
     return workspace
 
 
 @app.delete("/api/v1/workspaces/{workspace_id}")
-async def delete_workspace_by_id(workspace_id: str, db: Session = Depends(get_db)):
+async def delete_workspace_by_id(workspace_id: str):
     """
-    Delete a workspace by its ID from both the RAG backend and the local database.
+    Delete a workspace by its ID from both the RAG backend and the uploader,
+    including every stored document.
 
     Raises **404** if the workspace does not exist, or **500** if deletion in the RAG backend fails.
     """
-    workspace = db.query(Workspace).where(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _require_workspace(workspace_id)
     response = LLM_delete_workspace(workspace_id)
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail="Failed to delete workspace")
-    db.delete(workspace)
-    db.commit()
+    await asyncio.to_thread(store.delete_workspace, workspace_id)
     return {"deleted": workspace_id}
 
 
 # ---------------------------------------------------------------------------
-# Debug: rsync between workspace debug folders
+# Reembed / copy: rebuild embeddings from the converted documents kept in S3
 # ---------------------------------------------------------------------------
 
-def _validate_workspace_slug(slug: str) -> None:
-    """Reject slugs with path traversal or shell-unsafe characters."""
-    if not slug or ".." in slug or "/" in slug or "\\" in slug:
-        raise HTTPException(status_code=400, detail=f"Invalid workspace slug: {slug!r}")
+async def _embed_converted(workspace_id: str, record: dict) -> str:
+    """Embed a record's stored converted document into workspace_id; returns the doc id."""
+    if not record.get("converted"):
+        raise ValueError("still converting" if record.get("status") == "converting"
+                         else "no converted document stored for this file")
+    body = await asyncio.to_thread(store.get_object, record["converted"])
+    name = record["converted"].rsplit("/", 1)[-1]
+    return await asyncio.to_thread(LLM_upload_document, io.StringIO(body.decode("utf-8")), name, workspace_id)
 
-
-@app.post("/api/v1/debug/rsync")
-async def debug_rsync(request: Request):
-    """
-    Rsync the debug_uploads folder of one workspace to another.
-
-    Body: { "source_workspace": "<slug>", "destination_workspace": "<slug>" }
-    Passing the same slug for both is a safe no-op (rsync idempotent).
-    Requires X-API-Key header when APP_API_KEY is configured.
-    """
-    if APP_API_KEY and request.headers.get("X-API-Key") != APP_API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    if not DEBUG_UPLOAD_DIR:
-        raise HTTPException(status_code=400, detail="DEBUG_UPLOAD_DIR is not configured")
-
-    body = await request.json()
-    source_slug = body.get("source_workspace", "")
-    dest_slug = body.get("destination_workspace", "")
-
-    _validate_workspace_slug(source_slug)
-    _validate_workspace_slug(dest_slug)
-
-    source = Path(DEBUG_UPLOAD_DIR) / source_slug
-    destination = Path(DEBUG_UPLOAD_DIR) / dest_slug
-
-    if not source.exists():
-        raise HTTPException(status_code=404, detail=f"Source workspace folder not found: {source}")
-
-    destination.mkdir(parents=True, exist_ok=True)
-
-    result = subprocess.run(
-        ["rsync", "-a", f"{source}/", f"{destination}/"],
-        capture_output=True,
-        text=True,
-    )
-
-    return {
-        "source": str(source),
-        "destination": str(destination),
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Reembed: re-upload all cached documents for a workspace to the RAG backend
-# ---------------------------------------------------------------------------
 
 @app.post("/api/v1/workspaces/{workspace_id}/reembed")
-async def reembed_workspace(workspace_id: str, request: Request, db: Session = Depends(get_db)):
+async def reembed_workspace(workspace_id: str, request: Request):
     """
-    Re-upload every cached .docling.json (and pre-Docling .md) file in debug_uploads/{workspace_id}/ back to
-    the RAG backend. Useful for recovering from a wiped backend without user
-    involvement.
+    Embed every document of a workspace in the RAG backend again from its converted
+    documents in S3, e.g. after a backend wipe or to rebuild a deleted workspace.
 
-    Updates existing FileModel records with the new doc_id. Creates a new
-    record (category='reembedded') for any file not found in the DB.
+    Updates each file record with its new doc_id. Old embeddings are not removed.
     Requires X-API-Key header when APP_API_KEY is configured.
     """
-    if APP_API_KEY and request.headers.get("X-API-Key") != APP_API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_api_key(request)
+    _require_workspace(workspace_id)
 
-    if not DEBUG_UPLOAD_DIR:
-        raise HTTPException(status_code=400, detail="DEBUG_UPLOAD_DIR is not configured")
-
-    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-
-    workspace_dir = Path(DEBUG_UPLOAD_DIR) / workspace_id
-    if not workspace_dir.exists():
-        raise HTTPException(status_code=404, detail=f"No debug folder found for workspace: {workspace_id}")
-
-    cached_files = sorted(workspace_dir.glob(f"*{DOCLING_SUFFIX}")) + sorted(workspace_dir.glob("*.md"))
-    if not cached_files:
-        return {"reembedded": 0, "failed": []}
-
-    # Build a filename → FileModel lookup for fast matching
-    existing = {
-        f.filename: f
-        for f in db.query(FileModel).filter(FileModel.workspace_id == workspace_id).all()
-    }
-    # Also index by the debug copy's name (for documents stored with original filename)
-    existing_by_debug_name = {
-        name: f
-        for f in existing.values()
-        for name in _debug_filenames(f.filename)
-    }
-
-    reembedded = 0
+    new_ids = {}
     failed = []
-
-    for cached_path in cached_files:
+    for record in store.list_files(workspace_id):
         try:
-            content = cached_path.read_text(encoding="utf-8")
-            llm_file = io.StringIO(content)
-            llm_file.name = cached_path.name
-
-            new_doc_id = await asyncio.to_thread(
-                LLM_upload_document, llm_file, cached_path.name, workspace_id
-            )
-
-            # Find matching DB record (exact cached name, or original filename mapped to it)
-            rec = existing.get(cached_path.name) or existing_by_debug_name.get(cached_path.name)
-
-            if rec:
-                rec.id = new_doc_id
-            else:
-                rec = FileModel(
-                    id=new_doc_id,
-                    filename=cached_path.name,
-                    original_extension=".json" if cached_path.name.endswith(DOCLING_SUFFIX) else ".md",
-                    workspace_id=workspace_id,
-                    category="reembedded",
-                )
-                db.add(rec)
-
-            db.commit()
-            reembedded += 1
-
+            new_ids[record["key"]] = await _embed_converted(workspace_id, record)
         except Exception as e:
-            print(f"[reembed] failed for {cached_path.name}: {e}")
-            failed.append({"file": cached_path.name, "error": str(e)})
+            print(f"[reembed] failed for {record['filename']}: {e}")
+            failed.append({"file": record["filename"], "error": str(e)})
 
-    return {"reembedded": reembedded, "failed": failed}
+    await asyncio.to_thread(
+        store.update_files, workspace_id,
+        lambda files: [{**f, "id": new_ids.get(f["key"], f["id"])} for f in files],
+    )
+    return {"reembedded": len(new_ids), "failed": failed}
+
+
+@app.post("/api/v1/workspaces/{workspace_id}/copy")
+async def copy_workspace_documents(workspace_id: str, request: Request):
+    """
+    Copy every document of another workspace into this one: each converted
+    document is copied and embedded here, and gets its own record.
+
+    Body: { "source_workspace": "<slug>" }
+    Copied scrape pages become plain documents (the scrape jobs are not copied).
+    Requires X-API-Key header when APP_API_KEY is configured.
+    """
+    _require_api_key(request)
+    _require_workspace(workspace_id)
+    body = await request.json()
+    source_id = body.get("source_workspace", "")
+    _require_workspace(source_id)
+
+    copied = []
+    failed = []
+    for record in store.list_files(source_id):
+        try:
+            new = _new_file_record(
+                workspace_id,
+                filename=record["filename"],
+                original_extension=record["original_extension"],
+                category="copied" if record["category"].startswith("scrape_") else record["category"],
+                source_url=record.get("source_url"),
+                content_hash=record.get("content_hash"),
+            )
+            new["id"] = await _embed_converted(workspace_id, record)
+            new["converted"] = store.converted_key(workspace_id, new["key"], record["converted"].rsplit("/", 1)[-1])
+            content = await asyncio.to_thread(store.get_object, record["converted"])
+            await asyncio.to_thread(store.put_object, new["converted"], content)
+            copied.append(new)
+        except Exception as e:
+            print(f"[copy] failed for {record['filename']}: {e}")
+            failed.append({"file": record["filename"], "error": str(e)})
+
+    await asyncio.to_thread(store.add_files, workspace_id, copied)
+    return {"copied": len(copied), "failed": failed}

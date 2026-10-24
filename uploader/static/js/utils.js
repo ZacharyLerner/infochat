@@ -6,6 +6,7 @@ const uploadCounter = document.getElementById("uploadCounter");
 const fileDisplay = document.querySelector(".file_display");
 const uploadUrl = dropZone.dataset.url;
 const MAX_UPLOAD_BYTES = parseInt(dropZone.dataset.maxBytes, 10) || Infinity;
+const WORKSPACE_ID = document.getElementById("scrapeJobsPanel").dataset.workspaceId;
 
 let isUploading = false;
 let isScraping = false;
@@ -61,9 +62,10 @@ async function uploadFiles(files) {
     let failedCount = 0;
 
     const rows = {};
-    const steps = { uploaded: 25, converted: 50, embedded: 75, done: 100 };
+    const steps = { uploaded: 25, queued: 40, converted: 50, embedded: 75, done: 100 };
     const statusLabels = {
         uploaded: "Uploading...",
+        queued: "Sending for conversion...",
         converted: "Converting...",
         embedded: "Embedding...",
         done: "Complete",
@@ -184,7 +186,17 @@ async function uploadFiles(files) {
                 } else if (event.status === "done") {
                     completedCount++;
                     updateCounter();
-                    transformToCompleted(row, event);
+                    if (event.converting) {
+                        // Uploaded and queued: keep the progress row until conversion finishes
+                        row.dataset.key = event.key;
+                        row.dataset.filename = event.name;
+                        row.dataset.extension = event.original_extension || "";
+                        row.dataset.status = "converting";
+                        setConversionProgress(row, "converting");
+                        pollConverting();
+                    } else {
+                        transformToCompleted(row, event);
+                    }
                 } else {
                     const fill = row.querySelector(".progress-bar-fill");
                     const label = row.querySelector(".progress-label");
@@ -222,6 +234,8 @@ function transformToCompleted(row, event) {
     row.setAttribute("data-extension", event.original_extension || "");
     row.setAttribute("data-filename", displayName);
     row.setAttribute("data-date", now.toISOString());
+    row.setAttribute("data-key", event.key || "");
+    row.setAttribute("data-status", "ready");
     row.innerHTML = `
         <input type="checkbox" class="file-checkbox" data-id="${esc(fileId)}">
         <span class="ext-badge ext-${esc(ext)}">${esc(ext.toUpperCase() || "?")}</span>
@@ -240,6 +254,73 @@ function transformToCompleted(row, event) {
     }, { once: true });
 }
 
+/* ========== Conversion status ========== */
+
+// Non-text uploads are converted by docling-pipeline in the background. Their rows keep the
+// upload progress bar, moved along by the server's file record: converting (50%) ->
+// embedding (75%) -> ready (the normal row) or failed (row with the error).
+const CONVERSION_STEPS = { converting: 50, embedding: 75 };
+let convertingPoll = null;
+
+function convertingLabel(ext) {
+    // PDFs (OCR on scans, layout and table models) are where conversion takes minutes
+    return (ext || "").toLowerCase() === ".pdf"
+        ? "Converting… PDFs and scanned documents can take a few minutes."
+        : "Converting…";
+}
+
+function setConversionProgress(row, status) {
+    const pct = CONVERSION_STEPS[status];
+    row.querySelector(".progress-bar-fill").style.width = pct + "%";
+    row.querySelector(".progress-label").textContent = pct + "%";
+    row.querySelector(".file-info .date").textContent =
+        status === "embedding" ? "Embedding…" : convertingLabel(row.dataset.extension);
+}
+
+function pollConverting() {
+    if (convertingPoll) return;
+    convertingPoll = setInterval(async () => {
+        const rows = document.querySelectorAll(
+            '.file_card[data-status="converting"], .file_card[data-status="embedding"]');
+        if (!rows.length) {
+            clearInterval(convertingPoll);
+            convertingPoll = null;
+            return;
+        }
+        let files;
+        try {
+            const res = await fetch(`/api/v1/workspaces/${WORKSPACE_ID}`);
+            if (!res.ok) return;
+            files = (await res.json()).files;
+        } catch (e) {
+            return;
+        }
+        const byKey = Object.fromEntries(files.map(f => [f.key, f]));
+        rows.forEach(row => {
+            const f = byKey[row.dataset.key];
+            if (!f || f.status === row.dataset.status) return;
+            if (f.status in CONVERSION_STEPS) {
+                row.dataset.status = f.status;
+                setConversionProgress(row, f.status);
+                return;
+            }
+            transformToCompleted(row, {
+                location: f.id || f.key, key: f.key, name: f.filename,
+                original_extension: f.original_extension,
+            });
+            if (f.status === "failed") {
+                row.dataset.status = "failed";
+                const dateEl = row.querySelector(".file-info .date");
+                dateEl.textContent = "Conversion failed: " + (f.error || "unknown error");
+                dateEl.title = f.error || "";
+                dateEl.classList.add("file-error");
+            }
+        });
+    }, 5000);
+}
+
+pollConverting();
+
 /* ========== Delete Handlers ========== */
 
 function attachDeleteHandler(btn) {
@@ -247,7 +328,7 @@ function attachDeleteHandler(btn) {
         e.stopPropagation();
         if (!confirm("Delete this document?")) return;
 
-        const res = await fetch(`/delete/${btn.dataset.id}`, { method: "DELETE" });
+        const res = await fetch(`/${WORKSPACE_ID}/delete/${btn.dataset.id}`, { method: "DELETE" });
 
         if (res.ok) {
             const card = btn.closest(".file_card");
@@ -362,7 +443,7 @@ bulkDeleteBtn.addEventListener("click", async () => {
         : "Removing from workspace...";
     deleteOverlay.classList.add("visible");
 
-    const res = await fetch("/delete-bulk", {
+    const res = await fetch(`/${WORKSPACE_ID}/delete-bulk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file_ids: fileIds }),
@@ -1144,7 +1225,7 @@ function renderJobPages(listEl, pages, card) {
                 const btn = e.currentTarget;
                 btn.disabled = true;
 
-                const res = await fetch(`/delete/${page.id}`, { method: "DELETE" });
+                const res = await fetch(`/${WORKSPACE_ID}/delete/${page.id}`, { method: "DELETE" });
                 if (res.ok) {
                     // Remove from local pages array so re-renders stay accurate
                     const idx = pages.findIndex(p => p.id === page.id);
@@ -1336,12 +1417,13 @@ async function runJobById(jobId, workspaceId) {
 
                         // Refresh last scraped time via a quick GET
                         refreshJobCardMeta(card, jobId, workspaceId);
-                    } else if (["new", "changed", "unchanged", "removed"].includes(event.status)) {
+                    } else if (["new", "changed", "unchanged", "removed", "queued"].includes(event.status)) {
                         processedUrls++;
                         const pct = totalUrls > 0 ? Math.round((processedUrls / totalUrls) * 95) : 50;
                         progressFill.style.width = pct + "%";
 
                         const label = event.status === "new" ? "Adding" :
+                                      event.status === "queued" ? "Queued for conversion" :
                                       event.status === "changed" ? "Updating" :
                                       event.status === "removed" ? "Removing" : "Checking";
                         progressStatus.textContent = `${label}: ${event.url}`;

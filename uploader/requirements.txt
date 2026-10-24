@@ -1,16 +1,9 @@
-apscheduler
 beautifulsoup4
 curl_cffi
-docling
 fastapi[standard]
 jinja2
 pydantic
 python-dotenv
 requests
-sqlalchemy
+boto3
 uvicorn
-torch==2.9.0
-torchvision==0.24.0
-onnxruntime==1.23.2
-rapidocr==3.4.2
-opencv-python-headless==4.11.0.86

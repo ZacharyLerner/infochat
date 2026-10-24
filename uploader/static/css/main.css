@@ -1796,3 +1796,11 @@ body {
 }
 
 .scrape-job-failures-reason { flex-shrink: 0; font-size: 11px; color: #92400e; }
+
+/* Conversion failed (docling-pipeline result) */
+.file_card .file-info .date.file-error {
+    color: var(--error);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}

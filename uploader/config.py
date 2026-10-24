@@ -23,6 +23,21 @@ HEADERS: dict = {"X-API-Key": API_KEY} if API_KEY else {}
 APP_API_KEY: str = os.getenv("APP_API_KEY", "")
 
 # ---------------------------------------------------------------------------
+# S3 state bucket shared with the RAG backend (see store.py). Credentials come
+# from the standard boto3 chain (AWS_PROFILE, AWS_ACCESS_KEY_ID/..., instance role).
+# ---------------------------------------------------------------------------
+S3_STATE_BUCKET: str = os.getenv("S3_STATE_BUCKET", "zl-workspace-storage-727646498592-us-east-1-an")
+AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+
+# ---------------------------------------------------------------------------
+# docling-pipeline (see conversion.py): non-text documents are converted by a
+# Lambda. Jobs go to DOCLING_QUEUE_URL; its results come back on
+# DOCLING_RESULTS_QUEUE_URL, which every uploader server polls.
+# ---------------------------------------------------------------------------
+DOCLING_QUEUE_URL: str = os.getenv("DOCLING_QUEUE_URL", "")
+DOCLING_RESULTS_QUEUE_URL: str = os.getenv("DOCLING_RESULTS_QUEUE_URL", "")
+
+# ---------------------------------------------------------------------------
 # Upload constraints
 # ---------------------------------------------------------------------------
 MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB
@@ -32,5 +47,3 @@ MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB
 # conversion (they can be uploaded directly to the RAG backend).
 # ---------------------------------------------------------------------------
 TEXT_EXTENSIONS: set[str] = {".txt", ".json", ".xml", ".md", ".csv"}
-
-DEBUG_UPLOAD_DIR: str = os.getenv("DEBUG_UPLOAD_DIR", "")

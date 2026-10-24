@@ -13,7 +13,10 @@ class FileCreate(FileBase):
 
 class FileResponse(FileBase):
     model_config = ConfigDict(from_attributes=True)
-    id: str
+    id: str | None = None          # backend doc id; None while the document is converting
+    key: str | None = None         # stable id (also used to address converting documents)
+    status: str = "ready"          # converting | embedding | ready | failed
+    error: str | None = None
     workspace_id: str
     original_extension: str | None = None
     category: str

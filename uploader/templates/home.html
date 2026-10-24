@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', path='css/main.css') }}?v=13">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', path='css/main.css') }}?v=14">
     <title>{{ workspace.name }} - Documents</title>
 </head>
 <body>
@@ -96,19 +96,52 @@
                     <div class="file_display">
                     {%- for file in files %}
                         {% set ext = file.original_extension or '' %}
+                        {%- if file.status in ('converting', 'embedding') %}
+                        {#- Still being converted: same progress row as a live upload; utils.js moves it along #}
+                        {% set pct = 75 if file.status == 'embedding' else 50 %}
+                        <div class="file_card uploading"
+                             data-index="{{ loop.index0 }}"
+                             data-extension="{{ ext }}"
+                             data-filename="{{ file.filename }}"
+                             data-date="{{ file.uploaded_at.isoformat() if file.uploaded_at else '' }}"
+                             data-key="{{ file.key }}"
+                             data-status="{{ file.status }}">
+                            <div class="file-info">
+                                <div class="filename">{{ file.filename }}</div>
+                                {%- if file.status == 'embedding' %}
+                                <div class="date">Embedding…</div>
+                                {%- else %}
+                                <div class="date">Converting…{% if ext == '.pdf' %} PDFs and scanned documents can take a few minutes.{% endif %}</div>
+                                {%- endif %}
+                            </div>
+                            <div class="upload-indicator">
+                                <div class="progress-bar-track">
+                                    <div class="progress-bar-fill" style="width: {{ pct }}%"></div>
+                                </div>
+                                <span class="progress-label">{{ pct }}%</span>
+                            </div>
+                        </div>
+                        {%- else %}
                         <div class="file_card"
                              data-index="{{ loop.index0 }}"
                              data-extension="{{ ext }}"
                              data-filename="{{ file.filename }}"
-                             data-date="{{ file.uploaded_at.isoformat() if file.uploaded_at else '' }}">
-                            <input type="checkbox" class="file-checkbox" data-id="{{ file.id }}">
+                             data-date="{{ file.uploaded_at.isoformat() if file.uploaded_at else '' }}"
+                             data-key="{{ file.key }}"
+                             data-status="{{ file.status or 'ready' }}">
+                            <input type="checkbox" class="file-checkbox" data-id="{{ file.id or file.key }}">
                             <span class="ext-badge ext-{{ ext.replace('.', '') }}">{{ ext.replace('.', '').upper() or '?' }}</span>
                             <div class="file-info">
                                 <div class="filename">{{ file.filename }}</div>
-                                <div class="date">{{ file.uploaded_at }}</div>
+                                {%- if file.status == 'failed' %}
+                                <div class="date file-error" title="{{ file.error }}">Conversion failed: {{ file.error }}</div>
+                                {%- else %}
+                                <div class="date">{{ file.uploaded_at.strftime('%b %-d, %Y %-I:%M %p') if file.uploaded_at else '' }}</div>
+                                {%- endif %}
                             </div>
-                            <button class="btn-delete" data-id="{{ file.id }}">Delete</button>
+                            <button class="btn-delete" data-id="{{ file.id or file.key }}">Delete</button>
                         </div>
+                        {%- endif %}
                     {%- endfor %}</div>
                 </div>
             </div>
@@ -408,6 +441,6 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', path='js/utils.js') }}?v=13"></script>
+    <script src="{{ url_for('static', path='js/utils.js') }}?v=17"></script>
 </body>
 </html>
