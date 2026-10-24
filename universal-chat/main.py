@@ -1,10 +1,9 @@
-from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
 import os
 import smtplib
 import tempfile
@@ -15,8 +14,7 @@ from email.mime.text import MIMEText
 
 import anythingllm
 from models import ChatRequest, ChatSessionRequest, SendEmailRequest
-from db import engine, get_db
-import orm_models
+import store
 from schemas import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
 from config import LLM_GW_URL, LLM_GW_KEY
 import file_processor
@@ -30,13 +28,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 # Quieten noisy third-party loggers to WARNING so our DEBUG output is readable
-for _noisy in ("httpx", "httpcore", "uvicorn.access", "sqlalchemy.engine"):
+for _noisy in ("httpx", "httpcore", "uvicorn.access", "botocore", "boto3", "urllib3", "s3transfer"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
-
-# Create tables on startup
-orm_models.Base.metadata.create_all(bind=engine)
 
 # Existing non-documented routes use include_in_schema=False
 # New workspace management routes are visible in docs
@@ -122,8 +117,8 @@ async def settings_page(request: Request, slug: str = ""):
 
 
 @app.get("/{slug}", response_class=HTMLResponse, include_in_schema=False)
-async def chat_page(request: Request, slug: str, db: Session = Depends(get_db)):
-    ws = db.get(orm_models.Workspace, slug)
+async def chat_page(request: Request, slug: str):
+    ws = store.get_workspace(slug)
     if not ws:
         return templates.TemplateResponse(
             request,
@@ -131,7 +126,7 @@ async def chat_page(request: Request, slug: str, db: Session = Depends(get_db)):
             {"slug": slug},
             status_code=404,
         )
-    return templates.TemplateResponse(request, "home.html", {"slug": slug, "name": ws.name or slug})
+    return templates.TemplateResponse(request, "home.html", {"slug": slug, "name": ws["name"] or slug})
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +134,11 @@ async def chat_page(request: Request, slug: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat/{slug}", include_in_schema=False)
-async def chat_endpoint(slug: str, body: ChatRequest, db: Session = Depends(get_db)):
-    ws = db.get(orm_models.Workspace, slug)
+async def chat_endpoint(slug: str, body: ChatRequest):
+    ws = store.get_workspace(slug)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
-    email_suffix = anythingllm.EMAIL_PROMPT_SUFFIX if ws.email_enabled else ""
+    email_suffix = anythingllm.EMAIL_PROMPT_SUFFIX if ws["email_enabled"] else ""
     return StreamingResponse(
         anythingllm.stream_chat(
             slug=slug,
@@ -162,7 +157,7 @@ async def chat_endpoint(slug: str, body: ChatRequest, db: Session = Depends(get_
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat/{slug}/session", include_in_schema=False)
-async def create_chat_session(slug: str, db: Session = Depends(get_db)):
+async def create_chat_session(slug: str):
     """Create a new persistent chat session, proxying to RhodyRAG.
 
     Returns {"session_id": "<uuid>"} which the browser stores in localStorage
@@ -171,7 +166,7 @@ async def create_chat_session(slug: str, db: Session = Depends(get_db)):
     import httpx as _httpx
     from config import API_URL, HEADERS
 
-    ws = db.get(orm_models.Workspace, slug)
+    ws = store.get_workspace(slug)
     if not ws:
         logger.warning("create_chat_session: workspace '%s' not found", slug)
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
@@ -193,13 +188,13 @@ async def create_chat_session(slug: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/chat/{slug}/{session_id}/stream", include_in_schema=False)
-async def stream_chat_session(slug: str, session_id: str, body: ChatSessionRequest, db: Session = Depends(get_db)):
+async def stream_chat_session(slug: str, session_id: str, body: ChatSessionRequest):
     """Stream a response in a persistent chat session.
 
     Sends the conversation history to RhodyRAG so the ChatEngine can be
     re-seeded after a server restart (last 6 turns are used).
     """
-    ws = db.get(orm_models.Workspace, slug)
+    ws = store.get_workspace(slug)
     if not ws:
         logger.warning("stream_chat_session: workspace '%s' not found", slug)
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
@@ -214,7 +209,7 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionReque
         f" file='{body.file_context.filename}'" if has_file else "",
     )
 
-    email_suffix = anythingllm.EMAIL_PROMPT_SUFFIX if ws.email_enabled else ""
+    email_suffix = anythingllm.EMAIL_PROMPT_SUFFIX if ws["email_enabled"] else ""
     return StreamingResponse(
         anythingllm.stream_chat_session(
             slug=slug,
@@ -234,14 +229,14 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionReque
 # ---------------------------------------------------------------------------
 
 @app.post("/api/upload/{slug}", include_in_schema=False)
-async def upload_file(slug: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file(slug: str, file: UploadFile = File(...)):
     """Accept a file upload, run the two-stage processing pipeline, and return
     the resulting Markdown and one-sentence summary.
 
     The processed content is returned to the browser and stored client-side;
     nothing is persisted on the server after the request completes.
     """
-    ws = db.get(orm_models.Workspace, slug)
+    ws = store.get_workspace(slug)
     if not ws:
         logger.warning("upload_file: workspace '%s' not found", slug)
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
@@ -271,6 +266,7 @@ async def upload_file(slug: str, file: UploadFile = File(...), db: Session = Dep
         result = file_processor.process_upload(
             tmp_path=tmp_path,
             original_filename=original_name,
+            workspace_id=slug,
             gw_url=LLM_GW_URL,
             api_key=LLM_GW_KEY,
         )
@@ -363,22 +359,10 @@ async def send_email_endpoint(body: SendEmailRequest):
     summary="Create a workspace",
     tags=["Workspaces"],
 )
-def create_workspace(body: WorkspaceCreate, db: Session = Depends(get_db)):
-    existing = db.get(orm_models.Workspace, body.slug)
-    if existing:
+def create_workspace(body: WorkspaceCreate):
+    ws = body.model_dump()
+    if not store.create_workspace(ws):
         raise HTTPException(status_code=409, detail=f"Workspace '{body.slug}' already exists.")
-    ws = orm_models.Workspace(
-        slug=body.slug,
-        name=body.name,
-        welcome_text=body.welcome_text,
-        followup_enabled=body.followup_enabled,
-        followup_count=body.followup_count,
-        email_enabled=body.email_enabled,
-        default_questions=[c.model_dump() for c in body.default_questions],
-    )
-    db.add(ws)
-    db.commit()
-    db.refresh(ws)
     return ws
 
 
@@ -388,8 +372,8 @@ def create_workspace(body: WorkspaceCreate, db: Session = Depends(get_db)):
     summary="List all workspaces",
     tags=["Workspaces"],
 )
-def list_workspaces(db: Session = Depends(get_db)):
-    return db.query(orm_models.Workspace).all()
+def list_workspaces():
+    return store.list_workspaces()
 
 
 @app.get(
@@ -398,8 +382,8 @@ def list_workspaces(db: Session = Depends(get_db)):
     summary="Get workspace settings",
     tags=["Workspaces"],
 )
-def get_workspace(slug: str, db: Session = Depends(get_db)):
-    ws = db.get(orm_models.Workspace, slug)
+def get_workspace(slug: str):
+    ws = store.get_workspace(slug)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
     return ws
@@ -411,18 +395,10 @@ def get_workspace(slug: str, db: Session = Depends(get_db)):
     summary="Update workspace settings",
     tags=["Workspaces"],
 )
-def update_workspace(slug: str, body: WorkspaceUpdate, db: Session = Depends(get_db)):
-    ws = db.get(orm_models.Workspace, slug)
+def update_workspace(slug: str, body: WorkspaceUpdate):
+    ws = store.update_workspace(slug, body.model_dump())
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
-    ws.name = body.name
-    ws.welcome_text = body.welcome_text
-    ws.followup_enabled = body.followup_enabled
-    ws.followup_count = body.followup_count
-    ws.email_enabled = body.email_enabled
-    ws.default_questions = [c.model_dump() for c in body.default_questions]
-    db.commit()
-    db.refresh(ws)
     return ws
 
 
@@ -432,9 +408,6 @@ def update_workspace(slug: str, body: WorkspaceUpdate, db: Session = Depends(get
     summary="Delete a workspace",
     tags=["Workspaces"],
 )
-def delete_workspace(slug: str, db: Session = Depends(get_db)):
-    ws = db.get(orm_models.Workspace, slug)
-    if not ws:
+def delete_workspace(slug: str):
+    if not store.delete_workspace(slug):
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
-    db.delete(ws)
-    db.commit()

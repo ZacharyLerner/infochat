@@ -276,6 +276,7 @@ async def stream_chat_session(
     }
     if retrieval_query is not None:
         payload["retrieval_query"] = retrieval_query
+        payload["has_attachment"] = True  # backend answers from the document even if retrieval finds nothing
         logger.debug(
             "stream_chat_session: retrieval_query set (%d chars) — embedding model "
             "will see only this, not the full %d-char message",

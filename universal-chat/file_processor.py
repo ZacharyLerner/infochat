@@ -1,8 +1,8 @@
 """file_processor.py — Document / image → Markdown + summary pipeline.
 
-Stage 1A (image):   base64-encode → vision LLM (Maverick) → Markdown
-Stage 1B (document): docling (local, CPU) → Markdown
-Stage 2:            Markdown → one-sentence summary via Scout LLM
+Stage 1A (image):   base64-encode → vision LLM (Haiku) → Markdown
+Stage 1B (document): docling-pipeline Lambda (direct invoke) → Markdown
+Stage 2:            Markdown → one-sentence summary via Haiku
 
 The gateway URL and API key are read from config.py (LLM_GW_URL / LLM_GW_KEY).
 """
@@ -10,21 +10,28 @@ The gateway URL and API key are read from config.py (LLM_GW_URL / LLM_GW_KEY).
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import os
 import time
 import logging
+import uuid
 from typing import Optional
 
+import boto3
 import requests
+from botocore.config import Config
+
+import store
+from config import AWS_REGION, DOCLING_FUNCTION_NAME, S3_STATE_BUCKET
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Model identifiers
 # ---------------------------------------------------------------------------
-IMAGE_MODEL = "its_direct/pt1-llama-4-maverick-17b-us"   # vision → markdown
-SUMMARY_MODEL = "its_direct/pt1-llama-4-scout-17b-us"    # markdown → sentence
+IMAGE_MODEL = "its_rhodyrag_dev/pt2-claude-haiku-5.5-1m-us"     # vision → markdown
+SUMMARY_MODEL = "its_rhodyrag_dev/pt2-claude-haiku-5.5-1m-us"   # markdown → sentence
 
 # Extensions treated as images (vision model path)
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
@@ -139,46 +146,59 @@ def image_to_markdown(path: str, gw_url: str, api_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1B: Document → Markdown (local docling, CPU-only)
+# Stage 1B: Document → Markdown (docling-pipeline Lambda)
 # ---------------------------------------------------------------------------
 
-def document_to_markdown(path: str) -> str:
-    """Convert a document (PDF, DOCX, PPTX, etc.) to Markdown using docling."""
+# Markdown longer than this isn't useful in a chat turn (anythingllm truncates file
+# context to 60k chars); capping it keeps the Lambda's reply well under its 6 MB limit.
+MAX_MARKDOWN_CHARS = 200_000
+
+_lambda_client = None
+
+
+def _lambda():
+    """Lambda client that waits as long as a conversion can run (scanned PDFs: minutes)."""
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client(
+            "lambda", region_name=AWS_REGION or None,
+            config=Config(read_timeout=900, connect_timeout=10, retries={"max_attempts": 0}),
+        )
+    return _lambda_client
+
+
+def document_to_markdown(path: str, original_filename: str, workspace_id: str) -> str:
+    """Convert a document (PDF, DOCX, PPTX, etc.) to Markdown with the docling Lambda.
+
+    The file goes through the state bucket (Lambda payloads are capped at 6 MB):
+    it is stored under workspaces/<slug>/chat/uploads/<id>/, converted, and deleted.
+    """
     file_size = os.path.getsize(path)
-    logger.info("[Stage 1B] document→markdown: file=%s size=%.1fKB",
-                os.path.basename(path), file_size / 1024)
-
-    # Import here so docling is only loaded when actually needed
-    logger.debug("[Stage 1B] importing docling…")
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import (
-        PdfPipelineOptions,
-        AcceleratorOptions,
-        AcceleratorDevice,
-    )
-
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = False           # use embedded text; skip OCR
-    pipeline_options.accelerator_options = AcceleratorOptions(
-        num_threads=4,
-        device=AcceleratorDevice.CPU,         # avoids MPS float64 crash on Apple Silicon
-    )
-    logger.debug("[Stage 1B] pipeline_options: do_ocr=False device=CPU num_threads=4")
-
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-        }
-    )
+    key = f"workspaces/{workspace_id}/chat/uploads/{uuid.uuid4().hex}/{os.path.basename(original_filename)}"
+    logger.info("[Stage 1B] document→markdown: file=%s size=%.1fKB via Lambda %s",
+                original_filename, file_size / 1024, DOCLING_FUNCTION_NAME)
 
     t0 = time.perf_counter()
-    logger.debug("[Stage 1B] starting docling conversion…")
-    result = converter.convert(path)
-    markdown = result.document.export_to_markdown()
+    with open(path, "rb") as fh:
+        store._s3().put_object(Bucket=S3_STATE_BUCKET, Key=key, Body=fh.read())
+    try:
+        resp = _lambda().invoke(
+            FunctionName=DOCLING_FUNCTION_NAME,
+            Payload=json.dumps({"bucket": S3_STATE_BUCKET, "key": key, "max_chars": MAX_MARKDOWN_CHARS}),
+        )
+        result = json.loads(resp["Payload"].read() or b"{}")
+    finally:
+        store._s3().delete_object(Bucket=S3_STATE_BUCKET, Key=key)
+
+    if resp.get("FunctionError") or result.get("status") != "success":
+        error = result.get("error") or result.get("errorMessage") or "conversion failed"
+        logger.error("[Stage 1B] conversion failed for '%s': %s", original_filename, error)
+        raise RuntimeError(f"Could not convert {original_filename}: {error}")
+
     elapsed_ms = (time.perf_counter() - t0) * 1000
-    logger.info("[Stage 1B] docling done in %.0fms — markdown=%d chars", elapsed_ms, len(markdown))
-    return markdown
+    logger.info("[Stage 1B] done in %.0fms — markdown=%d chars ocr=%s truncated=%s",
+                elapsed_ms, len(result["markdown"]), result.get("ocr"), result.get("truncated"))
+    return result["markdown"]
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +246,14 @@ def process_upload(
     original_filename: str,
     gw_url: str,
     api_key: str,
+    workspace_id: str,
 ) -> dict:
     """Run the full two-stage pipeline on an uploaded file.
 
     Args:
         tmp_path:          Absolute path to the saved temporary file.
         original_filename: The filename as supplied by the browser.
+        workspace_id:      Workspace slug (documents pass through its S3 folder).
         gw_url:            LLM gateway URL (from config.LLM_GW_URL).
         api_key:           LLM gateway API key (from config.LLM_GW_KEY).
 
@@ -260,8 +282,8 @@ def process_upload(
         logger.info("process_upload: routing to Stage 1A (vision model)")
         markdown = image_to_markdown(tmp_path, gw_url, api_key)
     else:
-        logger.info("process_upload: routing to Stage 1B (docling)")
-        markdown = document_to_markdown(tmp_path)
+        logger.info("process_upload: routing to Stage 1B (docling Lambda)")
+        markdown = document_to_markdown(tmp_path, original_filename, workspace_id)
 
     # Stage 2 ─────────────────────────────────────────────────────────────────
     summary = markdown_to_summary(markdown, gw_url, api_key)
