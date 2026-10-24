@@ -1,0 +1,11 @@
+# Infochat uploader. Usage: create .env (see README.md), then docker compose up -d
+# Locally, docker-compose.override.yml is merged in automatically (source mount + reload);
+# in production use: docker compose -f docker-compose.yml up -d --build
+services:
+  uploader:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    # No local state: records and documents live in S3 (store.py), conversions go through SQS.
+    restart: unless-stopped

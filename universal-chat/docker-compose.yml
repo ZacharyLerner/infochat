@@ -1,0 +1,11 @@
+# Infochat universal-chat. Usage: create .env (see README.md), then docker compose up -d
+# Locally, docker-compose.override.yml is merged in automatically (source mount + reload);
+# in production use: docker compose -f docker-compose.yml up -d --build
+services:
+  chat:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    # No local state: chat settings live in S3 (store.py); attachments go to the docling Lambda.
+    restart: unless-stopped

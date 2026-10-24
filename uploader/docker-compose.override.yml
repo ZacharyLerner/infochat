@@ -1,0 +1,12 @@
+# Development overrides, merged automatically by `docker compose up`:
+# mounts the source and reloads uvicorn on changes (watchfiles comes with fastapi[standard]).
+services:
+  uploader:
+    volumes:
+      - .:/app
+    command: >
+      python -m uvicorn main:app
+      --host 0.0.0.0
+      --port 3000
+      --reload
+      --reload-exclude venv

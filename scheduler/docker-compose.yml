@@ -1,0 +1,6 @@
+# Usage: create .env (UPLOADER_URL, APP_API_KEY), then docker compose up -d
+services:
+  scheduler:
+    build: .
+    env_file: .env
+    restart: unless-stopped
