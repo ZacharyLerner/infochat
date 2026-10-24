@@ -42,6 +42,7 @@ from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.llms.litellm import LiteLLM
 
 import config
+import db
 import embedding
 import searxng as _searxng
 import rewriter as _rewriter
@@ -276,6 +277,7 @@ async def stream_chat_session(
     message: str,
     history: list[dict] | None = None,
     retrieval_query: str | None = None,
+    has_attachment: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Stream a persistent chat session response with true token-by-token streaming.
 
@@ -379,12 +381,16 @@ async def stream_chat_session(
                 f"Answer: "
             )
         else:
-            if not nodes and not web_results:
-                # Nothing from either source
+            if not nodes and not web_results and not has_attachment:
+                # Nothing from either source. (With an attached document the message itself
+                # carries the context, so the LLM still answers.)
                 if web_enabled:
-                    yield "event: token\ndata: No relevant information found in documents or web search.\n\n"
+                    reply = "No relevant information found in documents or web search."
+                elif await asyncio.to_thread(db.list_docs, workspace["slug"]):
+                    reply = "No relevant information found in this workspace's documents."
                 else:
-                    yield "event: token\ndata: No documents have been embedded in this workspace yet.\n\n"
+                    reply = "No documents have been embedded in this workspace yet."
+                yield f"event: token\ndata: {reply}\n\n"
                 yield "event: sources\ndata: {\"documents\": [], \"web\": []}\n\n"
                 yield "event: done\ndata: [DONE]\n\n"
                 return

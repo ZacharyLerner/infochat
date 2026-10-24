@@ -7,7 +7,7 @@ A multi-workspace RAG (retrieval-augmented generation) backend for the Universit
 - **FastAPI backend** (`main.py`) serves the API under `/api` and an admin UI at `/`.
 - **Embeddings and LLM calls** go through LiteLLM to the URI gateway (`https://llmgw.its.uri.edu/v1`).
 - **Vectors** live in **AWS S3 Vectors**: one index per workspace (`ws-<slug>`) in the bucket set by `S3_VECTOR_BUCKET`. The index is created with the workspace and deleted with it.
-- **Settings and document records** live as JSON in a regular S3 bucket (`S3_STATE_BUCKET`): `settings.json` for global settings, and `workspaces/<slug>/settings.json` and `docs.json` for each workspace. Updates use S3 conditional writes, so concurrent requests can't overwrite each other.
+- **Settings and document records** live as JSON in a regular S3 bucket (`S3_STATE_BUCKET`): `settings.json` for global settings, and `workspaces/<slug>/settings.json` and `docs.json` for each workspace. Updates use S3 conditional writes, so concurrent requests can't overwrite each other. The uploader (`workspaces/<slug>/uploader/`) and chat server (`workspaces/<slug>/chat.json`) keep their state in the same bucket, and deleting a workspace removes everything under its prefix.
 - **Query logs** are stored in the same bucket under `workspaces/<slug>/logs/<YYYY-MM-DD>/`: one file per single query, and one file per chat conversation holding all of its turns. The admin UI loads them 20 at a time, newest first, and can filter by date.
 - The container keeps no state of its own (chat memory is rebuilt from the browser's history after a restart).
 - **SearXNG** (optional) adds web search results to answers.

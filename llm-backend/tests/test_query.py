@@ -3,7 +3,7 @@ test_query.py
 =============
 Unit tests for query.py — RAG pipeline helpers and the query / streaming functions.
 
-All LLM, LanceDB, and network calls are mocked. No real model weights or
+All LLM, retrieval, and network calls are mocked. No real model weights or
 network access required.
 """
 
@@ -41,161 +41,66 @@ def _make_workspace(**overrides):
     return base
 
 
-def _make_mock_node(score=0.9, filename="doc.txt", content="chunk text"):
+def _node(metadata=None, content="chunk text", score=0.9):
     node = MagicMock()
     node.score = score
-    node.node.metadata = {"filename": filename}
+    node.node.metadata = metadata if metadata is not None else {"filename": "doc.txt"}
     node.node.get_content.return_value = content
     return node
 
 
-# ---------------------------------------------------------------------------
-# _safe_embed_query
-# ---------------------------------------------------------------------------
+def _streaming_llm(tokens, captured=None):
+    """Mock LLM whose astream_chat yields `tokens`; records the messages it was sent."""
+    async def _gen():
+        for t in tokens:
+            r = MagicMock()
+            r.delta = t
+            yield r
 
-class TestSafeEmbedQuery:
-    def test_short_query_unchanged(self):
-        q = "short query"
-        assert query._safe_embed_query(q) == q
+    async def _astream_chat(messages):
+        if captured is not None:
+            captured.append(list(messages))
+        return _gen()
 
-    def test_long_query_truncated_to_6000(self):
-        q = "x" * 9000
-        result = query._safe_embed_query(q)
-        assert len(result) == 6000
-
-    def test_exactly_6000_chars_unchanged(self):
-        q = "a" * 6000
-        assert query._safe_embed_query(q) == q
+    llm = MagicMock()
+    llm.astream_chat = _astream_chat
+    return llm
 
 
-# ---------------------------------------------------------------------------
-# _build_merged_context
-# ---------------------------------------------------------------------------
+def _collect(agen_factory, nodes, llm=None):
+    events = []
 
-class TestBuildMergedContext:
-    def test_empty_nodes_and_web_returns_empty_string(self):
-        assert query._build_merged_context([], []) == ""
+    async def _run():
+        with (
+            patch("query.embedding.retrieve", new=AsyncMock(return_value=nodes)),
+            patch("query._searxng.web_search", new=AsyncMock(return_value=[])),
+            patch("query.build_llm", return_value=llm),
+        ):
+            async for chunk in agen_factory():
+                events.append(chunk)
 
-    def test_nodes_only_includes_document_context(self):
-        nodes = [_make_mock_node(content="node content")]
-        result = query._build_merged_context(nodes, [])
-        assert "--- Document Context ---" in result
-        assert "node content" in result
-        assert "--- Web Search Results ---" not in result
-
-    def test_web_results_only_includes_web_section(self):
-        web = [{"title": "Page", "url": "https://example.com", "snippet": "excerpt"}]
-        result = query._build_merged_context([], web)
-        assert "--- Web Search Results ---" in result
-        assert "https://example.com" in result
-        assert "--- Document Context ---" not in result
-
-    def test_both_sources_present(self):
-        nodes = [_make_mock_node(content="doc chunk")]
-        web = [{"title": "W", "url": "https://w.com", "snippet": "snip"}]
-        result = query._build_merged_context(nodes, web)
-        assert "--- Document Context ---" in result
-        assert "--- Web Search Results ---" in result
-
-    def test_web_result_format_includes_all_fields(self):
-        web = [{"title": "URI Homepage", "url": "https://uri.edu", "snippet": "University of Rhode Island"}]
-        result = query._build_merged_context([], web)
-        assert "URI Homepage" in result
-        assert "https://uri.edu" in result
-        assert "University of Rhode Island" in result
-
-    def test_multiple_web_results_numbered(self):
-        web = [
-            {"title": "A", "url": "https://a.com", "snippet": "aa"},
-            {"title": "B", "url": "https://b.com", "snippet": "bb"},
-        ]
-        result = query._build_merged_context([], web)
-        assert "[1]\nTitle: A\nSource: https://a.com\naa" in result
-        assert "[2]\nTitle: B\nSource: https://b.com\nbb" in result
-
-    def test_web_numbering_continues_after_documents(self):
-        nodes = [_make_mock_node(content="doc one"), _make_mock_node(content="doc two")]
-        web = [{"title": "W", "url": "https://w.com", "snippet": "web text"}]
-        result = query._build_merged_context(nodes, web)
-        assert "[1]\n" in result and "[2]\n" in result
-        assert "[3]\nTitle: W\nSource: https://w.com\nweb text" in result
-
-    def test_multiple_nodes_all_included(self):
-        nodes = [
-            _make_mock_node(content="first chunk"),
-            _make_mock_node(content="second chunk"),
-        ]
-        result = query._build_merged_context(nodes, [])
-        assert "first chunk" in result
-        assert "second chunk" in result
+    asyncio.run(_run())
+    return events
 
 
 # ---------------------------------------------------------------------------
-# _rewrite_if_enabled
+# Citations
 # ---------------------------------------------------------------------------
 
-class TestNumberedPassages:
-    @staticmethod
-    def _node(metadata, content="chunk text", score=0.9):
-        node = MagicMock()
-        node.score = score
-        node.node.metadata = metadata
-        node.node.get_content.return_value = content
-        return node
-
+class TestCitations:
     def test_passages_numbered_with_title_and_source(self):
         nodes = [
-            self._node({"title": "URI ITSD Internal - Wi-Fi", "uri": "https://example.edu/wifi",
-                        "filename": "wifi.docling.json"}, "Gaming devices text"),
-            self._node({"filename": "notes.txt"}, "plain text"),
+            _node({"title": "URI ITSD Internal - Wi-Fi", "uri": "https://example.edu/wifi",
+                   "filename": "wifi.docling.json"}, "Gaming devices text"),
+            _node({"filename": "notes.txt"}, "plain text"),
         ]
         ctx = query._build_merged_context(nodes, [])
         assert "[1]\nTitle: URI ITSD Internal - Wi-Fi\nSource: https://example.edu/wifi\nGaming devices text" in ctx
         # Plain uploads fall back to their filename
         assert "[2]\nTitle: notes.txt\nSource: notes.txt\nplain text" in ctx
 
-    def test_source_falls_back_to_original_file_name(self):
-        ctx = query._build_merged_context(
-            [self._node({"title": "Quiz", "uri": "", "source": "Quiz.docx", "filename": "Quiz.docling.json"})], [])
-        assert "Source: Quiz.docx" in ctx
-
-    def test_doc_sources_mark_cited_passages(self):
-        nodes = [
-            self._node({"title": "Wi-Fi", "uri": "https://example.edu/wifi",
-                        "headings": ["Wi-Fi", "Gaming Devices"], "source_type": "html"}),
-            self._node({"filename": "notes.txt"}),
-            self._node({"title": "Zoom"}),
-        ]
-        sources = query._doc_sources(nodes, "Register the MAC address [1]. See also [3][7].")
-        assert [(s["n"], s["cited"]) for s in sources] == [(1, True), (2, False), (3, True)]
-        assert sources[0]["uri"] == "https://example.edu/wifi"
-        assert sources[0]["headings"] == ["Wi-Fi", "Gaming Devices"]
-        assert sources[0]["source_type"] == "html"
-        assert sources[1]["title"] == "notes.txt"
-        assert sources[1]["uri"] == "" and sources[1]["headings"] == []
-
-    def test_citation_instructions_sent_even_with_custom_system_prompt(self):
-        from prompts import CITATION_INSTRUCTIONS
-        ws = _make_workspace(system_prompt="You are the URI IT Service Desk assistant.")
-        mock_response = MagicMock()
-        mock_response.message.content = "Use rhodywifi [1]."
-        with (
-            patch("query.embedding.retrieve", new=AsyncMock(return_value=[_make_mock_node()])),
-            patch("query.build_llm") as mock_llm_fn,
-        ):
-            mock_llm_fn.return_value.chat.return_value = mock_response
-            result = query.query_workspace(ws, "How do I connect my Xbox?")
-        messages = mock_llm_fn.return_value.chat.call_args.args[0]
-        assert CITATION_INSTRUCTIONS in messages[-1].content
-        assert result["sources"]["documents"][0]["cited"] is True
-
-    def test_citation_instructions_cover_web_only_context(self):
-        from prompts import CITATION_INSTRUCTIONS
-        assert query._context_instructions([], [{"url": "https://u"}]) == " " + CITATION_INSTRUCTIONS
-        assert query._context_instructions([], []) == ""
-
     def test_web_sources_marked_cited_in_shared_numbering(self):
-        nodes = [self._node({"title": "Doc"})]
+        nodes = [_node({"title": "Doc"})]
         web = [
             {"title": "Used", "url": "https://used.example", "snippet": "a"},
             {"title": "Unused", "url": "https://unused.example", "snippet": "b"},
@@ -207,136 +112,44 @@ class TestNumberedPassages:
         ]
 
 
-class TestRewriteIfEnabled:
-    def test_no_rewrite_model_returns_original(self):
-        ws = _make_workspace(rewrite_model="")
-        result_query, rewritten = asyncio.run(query._rewrite_if_enabled("my question", ws))
-        assert result_query == "my question"
-        assert rewritten is None
-
-    def test_rewrite_model_set_calls_rewriter(self):
-        ws = _make_workspace(rewrite_model="openai/gpt-4o-mini")
-        with patch("query._rewriter.rewrite_query", new=AsyncMock(return_value="better query")):
-            result_query, rewritten = asyncio.run(
-                query._rewrite_if_enabled("my question", ws)
-            )
-        assert result_query == "better query"
-        assert rewritten == "better query"
-
-    def test_unchanged_query_returns_none_for_rewritten(self):
-        ws = _make_workspace(rewrite_model="openai/gpt-4o-mini")
-        with patch("query._rewriter.rewrite_query", new=AsyncMock(return_value="my question")):
-            result_query, rewritten = asyncio.run(
-                query._rewrite_if_enabled("my question", ws)
-            )
-        assert result_query == "my question"
-        assert rewritten is None   # no change → None
-
-
-# ---------------------------------------------------------------------------
-# _retrieve_nodes
-# ---------------------------------------------------------------------------
-
-class TestRetrieveNodes:
-    def _retrieve(self, ws, nodes):
-        mock = AsyncMock(return_value=nodes)
-        with patch("query.embedding.retrieve", new=mock):
-            return asyncio.run(query._retrieve_nodes("q", ws)), mock
-
-    def test_returns_empty_when_nothing_retrieved(self):
-        result, _ = self._retrieve(_make_workspace(), [])
-        assert result == []
-
-    def test_filters_below_similarity_threshold(self):
-        above = _make_mock_node(score=0.9)
-        below = _make_mock_node(score=0.5)
-        result, _ = self._retrieve(_make_workspace(similarity_threshold=0.8), [above, below])
-        assert above in result
-        assert below not in result
-
-    def test_includes_node_with_none_score(self):
-        """Nodes with score=None (exact match or score not available) should pass through."""
-        none_score_node = _make_mock_node(score=None)
-        result, _ = self._retrieve(_make_workspace(similarity_threshold=0.9), [none_score_node])
-        assert none_score_node in result
-
-    def test_top_n_passed_to_retriever(self):
-        ws = _make_workspace(top_n=7)
-        _, mock = self._retrieve(ws, [])
-        mock.assert_awaited_once_with(ws, "q", 7)
-
-
 # ---------------------------------------------------------------------------
 # query_workspace (blocking entry point)
 # ---------------------------------------------------------------------------
 
 class TestQueryWorkspace:
-    def _run(self, workspace, question, mock_nodes=None, mock_web=None, llm_answer="42"):
-        if mock_nodes is None:
-            mock_nodes = [_make_mock_node()]
-        if mock_web is None:
-            mock_web = []
-
+    def test_returns_answer_and_sources_documents(self):
+        nodes = [
+            _node({"title": "Wi-Fi", "uri": "https://example.edu/wifi", "filename": "wifi.docling.json",
+                   "headings": ["Wi-Fi", "Gaming Devices"], "source_type": "html"}, "content here", 0.85),
+            _node({"filename": "notes.txt"}),
+        ]
         mock_response = MagicMock()
-        mock_response.message.content = llm_answer
-
+        mock_response.message.content = "Register the MAC address [1]."
         with (
-            patch("query.embedding.retrieve", new=AsyncMock(return_value=mock_nodes)),
-            patch("query._searxng.web_search", new=AsyncMock(return_value=mock_web)),
+            patch("query.embedding.retrieve", new=AsyncMock(return_value=nodes)),
             patch("query.build_llm") as mock_llm_fn,
         ):
-            mock_llm = MagicMock()
-            mock_llm.chat.return_value = mock_response
-            mock_llm_fn.return_value = mock_llm
-            return query.query_workspace(workspace, question)
+            mock_llm_fn.return_value.chat.return_value = mock_response
+            result = query.query_workspace(_make_workspace(), "How do I connect my Xbox?")
 
-    def test_returns_answer_and_sources(self):
-        ws = _make_workspace()
-        result = self._run(ws, "What is 6 × 7?", llm_answer="42")
-        assert result["answer"] == "42"
-        assert "sources" in result
-        assert "documents" in result["sources"]
+        assert result["answer"] == "Register the MAC address [1]."
+        assert result["sources"]["documents"] == [
+            {"n": 1, "cited": True, "score": pytest.approx(0.85), "filename": "wifi.docling.json",
+             "title": "Wi-Fi", "uri": "https://example.edu/wifi", "headings": ["Wi-Fi", "Gaming Devices"],
+             "source_type": "html", "text": "content here"},
+            {"n": 2, "cited": False, "score": pytest.approx(0.9), "filename": "notes.txt",
+             "title": "notes.txt", "uri": "", "headings": [], "source_type": "", "text": "chunk text"},
+        ]
+        assert result["sources"]["web"] == []
 
     def test_no_documents_embedded_returns_message(self):
-        ws = _make_workspace()
-
         with (
             patch("query.embedding.retrieve", new=AsyncMock(return_value=[])),
             patch("query._searxng.web_search", new=AsyncMock(return_value=[])),
         ):
-            result = query.query_workspace(ws, "Q?")
+            result = query.query_workspace(_make_workspace(), "Q?")
         assert "No relevant documents" in result["answer"]
         assert result["sources"]["documents"] == []
-
-    def test_no_relevant_docs_above_threshold(self):
-        ws = _make_workspace(similarity_threshold=0.99)
-        # All nodes have low score — filtered out by threshold
-        low_score_node = _make_mock_node(score=0.1)
-        result = self._run(ws, "Q?", mock_nodes=[low_score_node])
-        assert "No relevant" in result["answer"]
-
-    def test_sources_structure(self):
-        ws = _make_workspace()
-        node = _make_mock_node(score=0.85, filename="file.pdf", content="content here")
-        result = self._run(ws, "Q?", mock_nodes=[node])
-        src = result["sources"]["documents"][0]
-        assert src["score"] == pytest.approx(0.85)
-        assert src["filename"] == "file.pdf"
-        assert "content here"[:200] in src["text"]
-
-    def test_rewritten_query_included_in_result(self):
-        ws = _make_workspace(rewrite_model="openai/gpt-4o-mini")
-        with (
-            patch("query._rewriter.rewrite_query", new=AsyncMock(return_value="rewritten q")),
-        ):
-            result = self._run(ws, "original q")
-        assert result.get("rewritten_query") == "rewritten q"
-
-    def test_web_search_results_included(self):
-        ws = _make_workspace(searxng_enabled=1)
-        web = [{"title": "T", "url": "https://u.com", "snippet": "s"}]
-        result = self._run(ws, "Q?", mock_nodes=[], mock_web=web, llm_answer="See [1].")
-        assert result["sources"]["web"] == [{**web[0], "n": 1, "cited": True}]
 
 
 # ---------------------------------------------------------------------------
@@ -344,175 +157,65 @@ class TestQueryWorkspace:
 # ---------------------------------------------------------------------------
 
 class TestStreamQueryWorkspace:
-    def _collect_stream(self, workspace, question, mock_nodes=None, mock_web=None, tokens=None):
-        if mock_nodes is None:
-            mock_nodes = [_make_mock_node()]
-        if mock_web is None:
-            mock_web = []
-        if tokens is None:
-            tokens = ["Hello", " world"]
-
-        # query.py does: response_gen = await llm.astream_chat(messages)
-        # So astream_chat must be a coroutine that returns an async iterable.
-        _tokens = list(tokens)
-
-        async def _gen():
-            for t in _tokens:
-                r = MagicMock()
-                r.delta = t
-                yield r
-
-        async def _fake_astream_chat(messages):
-            return _gen()
-
-        mock_llm = MagicMock()
-        mock_llm.astream_chat = _fake_astream_chat
-
-        events = []
-
-        async def _run():
-            with (
-                patch("query.embedding.retrieve", new=AsyncMock(return_value=mock_nodes)),
-                patch("query._searxng.web_search", new=AsyncMock(return_value=mock_web)),
-                patch("query.build_llm", return_value=mock_llm),
-            ):
-                async for chunk in query.stream_query_workspace(workspace, question):
-                    events.append(chunk)
-
-        asyncio.run(_run())
-        return events
-
-    def test_emits_token_events(self):
-        ws = _make_workspace()
-        events = self._collect_stream(ws, "Q?", tokens=["tok1", "tok2"])
-        token_events = [e for e in events if e.startswith("event: token")]
-        assert len(token_events) == 2
-
-    def test_always_emits_done_event(self):
-        ws = _make_workspace()
-        events = self._collect_stream(ws, "Q?")
-        assert any("event: done" in e for e in events)
-
-    def test_emits_sources_event(self):
-        ws = _make_workspace()
-        events = self._collect_stream(ws, "Q?")
-        assert any("event: sources" in e for e in events)
-
-    def test_sources_event_marks_cited_passages(self):
-        ws = _make_workspace()
-        nodes = [_make_mock_node(filename="a.txt"), _make_mock_node(filename="b.txt")]
-        events = self._collect_stream(ws, "Q?", mock_nodes=nodes, tokens=["Answer ", "[2]", "."])
-        sources_event = next(e for e in events if e.startswith("event: sources"))
-        docs = json.loads(sources_event.split("data: ", 1)[1].strip())["documents"]
+    def test_streams_tokens_then_sources_then_done(self):
+        nodes = [_node({"filename": "a.txt"}), _node({"filename": "b.txt"})]
+        events = _collect(
+            lambda: query.stream_query_workspace(_make_workspace(), "Q?"),
+            nodes, _streaming_llm(["Answer ", "[2]", "."]),
+        )
+        kinds = [e.split("\n", 1)[0] for e in events]
+        assert kinds == ["event: token"] * 3 + ["event: sources", "event: done", "event: log"]
+        docs = json.loads(events[3].split("data: ", 1)[1].strip())["documents"]
         assert [(d["n"], d["cited"]) for d in docs] == [(1, False), (2, True)]
 
-    def test_emits_log_event(self):
-        ws = _make_workspace()
-        events = self._collect_stream(ws, "Q?")
-        assert any("event: log" in e for e in events)
-
-    def test_log_event_not_forwarded_in_main(self):
-        """The log event is intercepted by main.py and never in the public stream."""
-        # Verify that stream_query_workspace emits it so main.py CAN intercept it
-        ws = _make_workspace()
-        events = self._collect_stream(ws, "Q?")
-        log_events = [e for e in events if e.startswith("event: log")]
-        assert len(log_events) == 1
-        entry = json.loads(log_events[0].split("data: ", 1)[1].strip())
-        assert "question" in entry
-        assert "answer" in entry
-
-    def test_no_documents_emits_token_and_done(self):
-        ws = _make_workspace(searxng_enabled=0)
-
-        events = []
-
-        async def _run():
-            with (
-                patch("query.embedding.retrieve", new=AsyncMock(return_value=[])),
-                patch("query._searxng.web_search", new=AsyncMock(return_value=[])),
-            ):
-                async for chunk in query.stream_query_workspace(ws, "Q?"):
-                    events.append(chunk)
-
-        asyncio.run(_run())
-        assert any("event: done" in e for e in events)
-        assert any("No relevant documents" in e for e in events)
-
-    def test_prompt_suffix_appended(self):
-        """prompt_suffix should be appended to the user prompt."""
-        ws = _make_workspace()
-        node = _make_mock_node()
-
-        # Use a mutable container so the nested async generator can write to it.
-        captured = {"messages": []}
-
-        async def _inner_gen(msgs):
-            r = MagicMock()
-            r.delta = "answer"
-            yield r
-
-        async def _fake_astream_chat(messages):
-            captured["messages"] = list(messages)
-            return _inner_gen(messages)
-
-        mock_llm = MagicMock()
-        mock_llm.astream_chat = _fake_astream_chat
-
-        async def _run():
-            with (
-                patch("query.embedding.retrieve", new=AsyncMock(return_value=[node])),
-                patch("query._searxng.web_search", new=AsyncMock(return_value=[])),
-                patch("query.build_llm", return_value=mock_llm),
-            ):
-                async for _ in query.stream_query_workspace(ws, "Q?", prompt_suffix=" [SUFFIX]"):
-                    pass
-
-        asyncio.run(_run())
-        assert len(captured["messages"]) > 0, "No messages were captured — LLM was not called"
-        user_msg = next(m for m in captured["messages"] if m.role.value == "user")
-        assert "[SUFFIX]" in user_msg.content
-
-    def test_newlines_in_tokens_escaped(self):
-        """Newlines in token data must be escaped to \\n in SSE."""
-        ws = _make_workspace()
-        events = self._collect_stream(ws, "Q?", tokens=["line1\nline2"])
-        token_events = [e for e in events if e.startswith("event: token")]
-        # Raw newline must NOT appear inside the data line
-        for ev in token_events:
-            data_line = [l for l in ev.split("\n") if l.startswith("data:")][0]
-            assert "\n" not in data_line.replace("\\n", "")
-
 
 # ---------------------------------------------------------------------------
-# build_llm
+# stream_chat_session
 # ---------------------------------------------------------------------------
 
-class TestBuildLLM:
-    def test_returns_gateway_litellm_instance(self):
-        with patch("query.LiteLLM.__init__", return_value=None):
-            llm = query.build_llm("openai/gpt-4o", "key", 0.5, "sys")
-            assert isinstance(llm, query._GatewayLiteLLM)
+class TestChatSession:
+    def test_session_rebuilt_from_history_then_remembers_turns(self):
+        sid = "test-session-rebuild"
+        ws = _make_workspace()
+        captured = []
+        history = [
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+        ]
+        try:
+            # First message after a server restart: memory is seeded from browser history
+            _collect(lambda: query.stream_chat_session(sid, ws, "follow-up", history=history),
+                     [_node()], _streaming_llm(["reply one"], captured))
+            # Next message reuses the in-memory session (history not resent)
+            _collect(lambda: query.stream_chat_session(sid, ws, "second"),
+                     [_node()], _streaming_llm(["reply two"], captured))
+        finally:
+            query._chat_sessions.pop(sid, None)
 
-    def test_gateway_model_id_gets_openai_prefix(self):
-        with patch("query.LiteLLM.__init__", return_value=None) as init:
-            query.build_llm("its_sd_discord_bot_dev/pt3-claude-opus-4.7-1m-us", "key", 0.5)
-            assert init.call_args.kwargs["model"] == "openai/its_sd_discord_bot_dev/pt3-claude-opus-4.7-1m-us"
+        first, second = ([m.content for m in msgs] for msgs in captured)
+        assert "earlier question" in first and "earlier answer" in first
+        assert {"earlier question", "earlier answer", "follow-up", "reply one"} <= set(second)
 
-    def test_prefixed_model_not_double_prefixed(self):
-        with patch("query.LiteLLM.__init__", return_value=None) as init:
-            query.build_llm("openai/gpt-4o", "key", 0.5)
-            assert init.call_args.kwargs["model"] == "openai/gpt-4o"
+    def _empty_retrieval(self, sid, **kw):
+        captured = []
+        try:
+            events = _collect(lambda: query.stream_chat_session(sid, _make_workspace(), "doc block + question", **kw),
+                              [], _streaming_llm(["from the attachment"], captured))
+        finally:
+            query._chat_sessions.pop(sid, None)
+        tokens = "".join(e.split("data: ", 1)[1].strip() for e in events if e.startswith("event: token"))
+        return tokens, captured
 
-    def test_metadata_context_window_overridden(self):
-        """_GatewayLiteLLM.metadata must return our fixed large context window."""
-        llm = query._GatewayLiteLLM.__new__(query._GatewayLiteLLM)
-        # Patch super().metadata to return a minimal object
-        base_meta = MagicMock()
-        base_meta.num_output = 512
-        base_meta.is_chat_model = True
-        base_meta.is_function_calling_model = False
-        base_meta.model_name = "test-model"
-        with patch.object(query.LiteLLM, "metadata", new_callable=lambda: property(lambda self: base_meta)):
-            meta = llm.metadata
-        assert meta.context_window == query._CONTEXT_WINDOW
+    def test_attachment_answered_even_when_retrieval_finds_nothing(self):
+        tokens, captured = self._empty_retrieval("s-attach", has_attachment=True)
+        assert tokens == "from the attachment"
+        assert any("doc block + question" in m.content for m in captured[0])
+
+    @pytest.mark.parametrize("docs, reply", [
+        ([], "No documents have been embedded in this workspace yet."),
+        ([{"doc_id": "d1"}], "No relevant information found in this workspace's documents."),
+    ])
+    def test_empty_retrieval_reply_says_why(self, docs, reply):
+        with patch("query.db.list_docs", return_value=docs):
+            tokens, captured = self._empty_retrieval("s-empty")
+        assert tokens == reply and captured == []

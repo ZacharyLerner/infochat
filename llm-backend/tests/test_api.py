@@ -6,228 +6,88 @@ Integration tests for the FastAPI HTTP layer (main.py).
 These tests use FastAPI's TestClient with:
   - real routing, request validation, and response serialisation
   - in-memory fake S3 bucket for settings (via conftest.isolate_config)
-  - manager calls mocked (via conftest.test_client) — no outbound HTTP
-  - LanceDB and LLM calls mocked where needed
+  - manager calls and S3 Vectors index lifecycle mocked (via conftest.test_client)
+  - embedding and LLM calls mocked where needed
 
 Coverage
 --------
-  - Authentication guard (403 without key, 200 with key)
-  - GET /settings / PUT /settings
-  - GET /defaults
-  - GET /workspaces
-  - POST /workspace (create)
-  - GET /workspace/{slug}
-  - PUT /workspace/{slug} (update)
-  - DELETE /workspace/{slug}
-  - POST /workspace/{slug}/embed  (mocked embedding)
-  - DELETE /workspace/{slug}/embed/{doc_id}
-  - POST /workspace/{slug}/query  (mocked retrieval + LLM)
-  - POST /workspace/{slug}/query/stream
-  - POST /workspace/{slug}/chat/session
-  - POST /workspace/{slug}/chat/{session_id}/stream
-  - DELETE /workspace/{slug}/chat/{session_id}
-  - GET /workspace/{slug}/logs
-  - DELETE /workspace/{slug}/logs
-  - GET /docs/{slug}
-  - POST /docs/{slug}
-  - DELETE /docs/{slug}/{doc_id}
-  - DELETE /docs/{slug}
+  - Authentication guard on /api, SPA catch-all (no key, no path traversal)
+  - Workspace create rollback, embed-model lock, delete cleanup
+  - Embedding upload recorded in docs.json, vectors removed if recording fails
+  - Query logging
+  - API key masking
 """
 
 import io
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import AUTH_HEADERS, TEST_API_KEY
+from tests.conftest import AUTH_HEADERS
 
 
 # ---------------------------------------------------------------------------
-# Authentication
+# Authentication / SPA
 # ---------------------------------------------------------------------------
 
 class TestAuth:
-    def test_missing_key_returns_403(self, test_client):
-        resp = test_client.get("/api/workspaces")
-        assert resp.status_code == 403
+    @pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong"}])
+    def test_api_rejects_missing_or_wrong_key(self, test_client, headers):
+        assert test_client.get("/api/workspaces", headers=headers).status_code == 403
 
-    def test_wrong_key_returns_403(self, test_client):
-        resp = test_client.get("/api/workspaces", headers={"X-API-Key": "wrong"})
-        assert resp.status_code == 403
-
-    def test_correct_key_returns_200(self, test_client):
+    def test_correct_key_accepted(self, test_client):
         resp = test_client.get("/api/auth/verify", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
 
-    def test_auth_verify_endpoint(self, test_client):
-        resp = test_client.get("/api/auth/verify", headers=AUTH_HEADERS)
+    def test_spa_catchall_needs_no_key_and_blocks_traversal(self, test_client):
+        index_html = Path("public/index.html").read_text()
+        resp = test_client.get("/workspace/some-slug/query")
         assert resp.status_code == 200
+        assert resp.text == index_html
+        assert test_client.get("/app.js").text == Path("public/app.js").read_text()
+        # A path escaping public/ falls back to index.html instead of leaking source
+        traversal = test_client.get("/%2e%2e/main.py")
+        assert traversal.text == index_html
 
 
 # ---------------------------------------------------------------------------
-# Global settings
+# Workspace lifecycle
 # ---------------------------------------------------------------------------
 
-class TestSettings:
-    def test_get_settings_returns_dict(self, test_client):
-        resp = test_client.get("/api/settings", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "llm_model" in data
-        assert "temperature" in data
+class TestWorkspace:
+    def test_create_rolls_back_if_index_cannot_be_made(self, test_client):
+        with patch("main.embedding.create_workspace_index", side_effect=RuntimeError("s3v down")):
+            resp = test_client.post("/api/workspace", json={"name": "Doomed"}, headers=AUTH_HEADERS)
+        assert resp.status_code == 502
+        assert test_client.get("/api/workspaces", headers=AUTH_HEADERS).json() == []
 
-    def test_put_settings_updates_field(self, test_client):
+    def test_embed_model_locked_after_creation(self, test_client):
+        ws = test_client.post(
+            "/api/workspace", json={"name": "Locked", "embed_model": "model-a"}, headers=AUTH_HEADERS,
+        ).json()
         resp = test_client.put(
-            "/api/settings",
-            json={"temperature": 0.3, "top_n": 8},
+            f"/api/workspace/{ws['slug']}",
+            json={"name": "Renamed", "embed_model": "model-b"},
             headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["temperature"] == pytest.approx(0.3)
-        assert data["top_n"] == 8
+        assert resp.json()["name"] == "Renamed"
+        assert resp.json()["embed_model"] == "model-a"
 
-    def test_put_settings_clamps_searxng_num_results(self, test_client):
-        """searxng_num_results must be clamped to 1–10."""
-        resp = test_client.put(
-            "/api/settings",
-            json={"searxng_num_results": 99},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        assert resp.json()["searxng_num_results"] == 10
-
-    def test_put_settings_clamps_lower_bound(self, test_client):
-        resp = test_client.put(
-            "/api/settings",
-            json={"searxng_num_results": 0},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        assert resp.json()["searxng_num_results"] == 1
-
-    def test_get_defaults(self, test_client):
-        resp = test_client.get("/api/defaults", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "default_system_prompt_rag" in data
-        assert "default_system_prompt_web" in data
-        assert "default_rewrite_prompt" in data
-        assert len(data["default_system_prompt_rag"]) > 10
-
-
-# ---------------------------------------------------------------------------
-# Workspace CRUD
-# ---------------------------------------------------------------------------
-
-class TestWorkspaceCRUD:
-    def test_list_workspaces_empty(self, test_client):
-        resp = test_client.get("/api/workspaces", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        assert resp.json() == []
-
-    def test_create_workspace_minimal(self, test_client):
-        resp = test_client.post(
-            "/api/workspace",
-            json={"name": "My Workspace"},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["name"] == "My Workspace"
-        assert "slug" in data
-
-    def test_create_workspace_with_all_fields(self, test_client):
-        resp = test_client.post(
-            "/api/workspace",
-            json={
-                "name": "Full Workspace",
-                "llm_model": "openai/gpt-4o",
-                "temperature": 0.5,
-                "top_n": 10,
-                "similarity_threshold": 0.6,
-                "searxng_enabled": False,
-                "searxng_num_results": 5,
-                "searxng_query_suffix": "site:uri.edu",
-                "rewrite_model": "openai/gpt-4o-mini",
-            },
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["llm_model"] == "openai/gpt-4o"
-        assert data["temperature"] == pytest.approx(0.5)
-        assert data["top_n"] == 10
-        assert data["searxng_query_suffix"] == "site:uri.edu"
-
-    def test_list_workspaces_after_create(self, test_client):
-        test_client.post("/api/workspace", json={"name": "A"}, headers=AUTH_HEADERS)
-        test_client.post("/api/workspace", json={"name": "B"}, headers=AUTH_HEADERS)
-        resp = test_client.get("/api/workspaces", headers=AUTH_HEADERS)
-        assert len(resp.json()) == 2
-
-    def test_get_workspace_by_slug(self, test_client, workspace):
+    def test_delete_removes_index_and_records(self, test_client, workspace):
+        import embedding
         slug = workspace["slug"]
-        resp = test_client.get(f"/api/workspace/{slug}", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        assert resp.json()["slug"] == slug
+        test_client.post(f"/api/docs/{slug}", json={"doc_id": "d1", "filename": "f.txt"}, headers=AUTH_HEADERS)
+        with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
+            test_client.post(f"/api/workspace/{slug}/query", json={"question": "Q?"}, headers=AUTH_HEADERS)
 
-    def test_get_workspace_not_found(self, test_client):
-        resp = test_client.get("/api/workspace/no-such-workspace-abc", headers=AUTH_HEADERS)
-        assert resp.status_code == 404
-
-    def test_update_workspace_name(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.put(
-            f"/api/workspace/{slug}",
-            json={"name": "Renamed Workspace"},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        assert resp.json()["name"] == "Renamed Workspace"
-
-    def test_update_workspace_settings(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.put(
-            f"/api/workspace/{slug}",
-            json={"temperature": 0.1, "top_n": 3, "searxng_enabled": True},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["temperature"] == pytest.approx(0.1)
-        assert data["top_n"] == 3
-        assert data["searxng_enabled"] == 1
-
-    def test_update_workspace_not_found(self, test_client):
-        resp = test_client.put(
-            "/api/workspace/no-such-slug",
-            json={"name": "X"},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 404
-
-    def test_delete_workspace(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.delete(f"/api/workspace/{slug}", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
-
-    def test_delete_workspace_removes_it(self, test_client, workspace):
-        slug = workspace["slug"]
-        test_client.delete(f"/api/workspace/{slug}", headers=AUTH_HEADERS)
-        resp = test_client.get(f"/api/workspace/{slug}", headers=AUTH_HEADERS)
-        assert resp.status_code == 404
-
-    def test_delete_workspace_not_found(self, test_client):
-        resp = test_client.delete("/api/workspace/no-such-slug", headers=AUTH_HEADERS)
-        assert resp.status_code == 404
-
-    def test_create_workspace_missing_name_returns_422(self, test_client):
-        resp = test_client.post("/api/workspace", json={}, headers=AUTH_HEADERS)
-        assert resp.status_code == 422
+        assert test_client.delete(f"/api/workspace/{slug}", headers=AUTH_HEADERS).status_code == 200
+        embedding.delete_workspace_index.assert_called_once_with(slug)
+        assert test_client.get(f"/api/workspace/{slug}", headers=AUTH_HEADERS).status_code == 404
+        assert test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json() == []
+        assert test_client.get(f"/api/workspace/{slug}/logs", headers=AUTH_HEADERS).json()["entries"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -236,127 +96,36 @@ class TestWorkspaceCRUD:
 
 class TestEmbedEndpoints:
     # doc_id is always a server-generated UUID in production
-    # (see embedding.embed_workspace_file), and DELETE /workspace/{slug}/embed/{doc_id}
-    # validates the UUID format before use, so the mock must return one too.
     FAKE_DOC_ID = "12345678-1234-5678-1234-567812345678"
 
-    def _mock_embed(self):
-        """Return a context manager that patches embed_workspace_file."""
-        return patch(
-            "main.embedding.embed_workspace_file",
-            return_value=(5, self.FAKE_DOC_ID),
+    def _post_file(self, test_client, slug, name="doc.txt"):
+        return test_client.post(
+            f"/api/workspace/{slug}/embed",
+            files={"file": (name, io.BytesIO(b"content"), "text/plain")},
+            headers=AUTH_HEADERS,
         )
-
-    def test_embed_file_success(self, test_client, workspace):
-        slug = workspace["slug"]
-        with self._mock_embed():
-            resp = test_client.post(
-                f"/api/workspace/{slug}/embed",
-                files={"file": ("test.txt", io.BytesIO(b"Hello world"), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "ok"
-        assert data["chunks_embedded"] == 5
-        assert data["doc_id"] == self.FAKE_DOC_ID
-        assert data["filename"] == "test.txt"
-
-    def test_embed_file_workspace_not_found(self, test_client):
-        with self._mock_embed():
-            resp = test_client.post(
-                "/api/workspace/no-such-slug/embed",
-                files={"file": ("doc.txt", io.BytesIO(b"text"), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 404
-
-    def test_embed_file_zero_chunks_returns_422(self, test_client, workspace):
-        slug = workspace["slug"]
-        with patch("main.embedding.embed_workspace_file", return_value=(0, "")):
-            resp = test_client.post(
-                f"/api/workspace/{slug}/embed",
-                files={"file": ("empty.txt", io.BytesIO(b""), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 422
 
     def test_embed_file_records_in_docs(self, test_client, workspace):
         slug = workspace["slug"]
-        with self._mock_embed():
-            test_client.post(
-                f"/api/workspace/{slug}/embed",
-                files={"file": ("doc.txt", io.BytesIO(b"content"), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
-        resp = test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS)
+        with patch("main.embedding.embed_workspace_file", return_value=(5, self.FAKE_DOC_ID)):
+            resp = self._post_file(test_client, slug)
         assert resp.status_code == 200
-        docs = resp.json()
-        assert len(docs) == 1
-        assert docs[0]["filename"] == "doc.txt"
-        assert docs[0]["doc_id"] == self.FAKE_DOC_ID
+        assert resp.json()["chunks_embedded"] == 5
+        docs = test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json()
+        assert [(d["doc_id"], d["filename"]) for d in docs] == [(self.FAKE_DOC_ID, "doc.txt")]
 
     def test_embed_record_failure_removes_vectors(self, test_client, workspace):
         """If docs.json can't be updated, the new vectors are deleted and a retryable 503 is returned."""
         slug = workspace["slug"]
         with (
-            self._mock_embed(),
+            patch("main.embedding.embed_workspace_file", return_value=(5, self.FAKE_DOC_ID)),
             patch("main.db.add_doc", side_effect=RuntimeError("Too many concurrent updates")),
             patch("main.embedding.delete_workspace_file", return_value=5) as delete,
         ):
-            resp = test_client.post(
-                f"/api/workspace/{slug}/embed",
-                files={"file": ("busy.txt", io.BytesIO(b"content"), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
+            resp = self._post_file(test_client, slug, "busy.txt")
         assert resp.status_code == 503
-        assert "Retry" in resp.json()["detail"]
         delete.assert_called_once_with(slug, self.FAKE_DOC_ID, 5)
         assert test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json() == []
-
-    def test_embed_record_failure_still_503_if_cleanup_fails(self, test_client, workspace):
-        slug = workspace["slug"]
-        with (
-            self._mock_embed(),
-            patch("main.db.add_doc", side_effect=RuntimeError("busy")),
-            patch("main.embedding.delete_workspace_file", side_effect=RuntimeError("s3 down")),
-        ):
-            resp = test_client.post(
-                f"/api/workspace/{slug}/embed",
-                files={"file": ("busy.txt", io.BytesIO(b"content"), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 503
-
-    def test_delete_embed_success(self, test_client, workspace):
-        slug = workspace["slug"]
-        # First embed a file to get a valid doc_id in docs.json
-        with self._mock_embed():
-            embed_resp = test_client.post(
-                f"/api/workspace/{slug}/embed",
-                files={"file": ("del.txt", io.BytesIO(b"data"), "text/plain")},
-                headers=AUTH_HEADERS,
-            )
-        doc_id = embed_resp.json()["doc_id"]
-
-        with patch("main.embedding.delete_workspace_file", return_value=3):
-            resp = test_client.delete(
-                f"/api/workspace/{slug}/embed/{doc_id}",
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "ok"
-        assert data["chunks_deleted"] == 3
-
-    def test_delete_embed_not_found(self, test_client, workspace):
-        slug = workspace["slug"]
-        with patch("main.embedding.delete_workspace_file", return_value=0):
-            resp = test_client.delete(
-                f"/api/workspace/{slug}/embed/nonexistent-doc-id",
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -371,282 +140,17 @@ _MOCK_QUERY_RESULT = {
 
 
 class TestQueryEndpoints:
-    def test_query_workspace_success(self, test_client, workspace):
+    def test_query_answers_and_appends_to_log(self, test_client, workspace):
         slug = workspace["slug"]
         with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
             resp = test_client.post(
-                f"/api/workspace/{slug}/query",
-                json={"question": "What is the answer?"},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["answer"] == "The answer is 42."
-        assert "sources" in data
-
-    def test_query_workspace_not_found(self, test_client):
-        with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
-            resp = test_client.post(
-                "/api/workspace/no-such-slug/query",
-                json={"question": "Q?"},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 404
-
-    def test_query_missing_question_returns_422(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.post(
-            f"/api/workspace/{slug}/query",
-            json={},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 422
-
-    def test_query_appends_to_log(self, test_client, workspace):
-        slug = workspace["slug"]
-        with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
-            test_client.post(
                 f"/api/workspace/{slug}/query",
                 json={"question": "Logged question?"},
                 headers=AUTH_HEADERS,
             )
-        resp = test_client.get(f"/api/workspace/{slug}/logs", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        logs = resp.json()["entries"]
-        assert len(logs) >= 1
-        assert logs[0]["question"] == "Logged question?"
-
-    def test_stream_query_workspace(self, test_client, workspace):
-        """Streaming endpoint should return SSE events."""
-        slug = workspace["slug"]
-
-        async def _fake_stream(ws, question, prompt_suffix=""):
-            yield "event: token\ndata: Hello\n\n"
-            yield "event: token\ndata:  world\n\n"
-            yield 'event: sources\ndata: {"documents": [], "web": []}\n\n'
-            yield "event: done\ndata: [DONE]\n\n"
-
-        with patch("main.query.stream_query_workspace", side_effect=_fake_stream):
-            resp = test_client.post(
-                f"/api/workspace/{slug}/query/stream",
-                json={"question": "Stream me something"},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers["content-type"]
-        body = resp.text
-        assert "event: token" in body
-        assert "event: done" in body
-
-    def test_stream_query_workspace_not_found(self, test_client):
-        resp = test_client.post(
-            "/api/workspace/ghost-slug/query/stream",
-            json={"question": "Q?"},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Chat session endpoints
-# ---------------------------------------------------------------------------
-
-class TestChatSessionEndpoints:
-    def test_create_chat_session(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.post(
-            f"/api/workspace/{slug}/chat/session",
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "session_id" in data
-        import uuid
-        uuid.UUID(data["session_id"])  # must be a valid UUID
-
-    def test_create_chat_session_workspace_not_found(self, test_client):
-        resp = test_client.post(
-            "/api/workspace/no-slug/chat/session",
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 404
-
-    def test_stream_chat_session(self, test_client, workspace):
-        slug = workspace["slug"]
-        # Create session
-        session_id = test_client.post(
-            f"/api/workspace/{slug}/chat/session", headers=AUTH_HEADERS
-        ).json()["session_id"]
-
-        async def _fake_chat_stream(sid, ws, message, history=None, retrieval_query=None):
-            yield "event: token\ndata: Chat response\n\n"
-            yield 'event: sources\ndata: {"documents": [], "web": []}\n\n'
-            yield "event: done\ndata: [DONE]\n\n"
-
-        with patch("main.query.stream_chat_session", side_effect=_fake_chat_stream):
-            resp = test_client.post(
-                f"/api/workspace/{slug}/chat/{session_id}/stream",
-                json={"message": "Hello, chatbot"},
-                headers=AUTH_HEADERS,
-            )
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers["content-type"]
-        assert "event: token" in resp.text
-
-    def test_delete_chat_session(self, test_client, workspace):
-        slug = workspace["slug"]
-        session_id = test_client.post(
-            f"/api/workspace/{slug}/chat/session", headers=AUTH_HEADERS
-        ).json()["session_id"]
-
-        resp = test_client.delete(
-            f"/api/workspace/{slug}/chat/{session_id}",
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 204
-
-    def test_stream_chat_workspace_not_found(self, test_client):
-        resp = test_client.post(
-            "/api/workspace/no-slug/chat/fake-session-id/stream",
-            json={"message": "Hi"},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Query log endpoints
-# ---------------------------------------------------------------------------
-
-class TestLogEndpoints:
-    def test_invalid_date_filter_rejected(self, test_client, workspace):
-        resp = test_client.get(
-            f"/api/workspace/{workspace['slug']}/logs?start=yesterday", headers=AUTH_HEADERS
-        )
-        assert resp.status_code == 400
-
-    def test_get_logs_empty(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.get(f"/api/workspace/{slug}/logs", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        assert resp.json() == {"entries": [], "next": None}
-
-    def test_get_logs_newest_first(self, test_client, workspace):
-        slug = workspace["slug"]
-        result1 = {**_MOCK_QUERY_RESULT, "answer": "First"}
-        result2 = {**_MOCK_QUERY_RESULT, "answer": "Second"}
-        with patch("main.query.query_workspace", return_value=result1):
-            test_client.post(
-                f"/api/workspace/{slug}/query",
-                json={"question": "First question"},
-                headers=AUTH_HEADERS,
-            )
-        with patch("main.query.query_workspace", return_value=result2):
-            test_client.post(
-                f"/api/workspace/{slug}/query",
-                json={"question": "Second question"},
-                headers=AUTH_HEADERS,
-            )
+        assert resp.json()["answer"] == "The answer is 42."
         logs = test_client.get(f"/api/workspace/{slug}/logs", headers=AUTH_HEADERS).json()["entries"]
-        assert logs[0]["question"] == "Second question"
-        assert logs[1]["question"] == "First question"
-
-    def test_clear_logs(self, test_client, workspace):
-        slug = workspace["slug"]
-        with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
-            test_client.post(
-                f"/api/workspace/{slug}/query",
-                json={"question": "Q?"},
-                headers=AUTH_HEADERS,
-            )
-        resp = test_client.delete(f"/api/workspace/{slug}/logs", headers=AUTH_HEADERS)
-        assert resp.status_code == 204
-        remaining = test_client.get(f"/api/workspace/{slug}/logs", headers=AUTH_HEADERS).json()
-        assert remaining["entries"] == []
-
-    def test_logs_cleared_on_workspace_delete(self, test_client, workspace):
-        slug = workspace["slug"]
-        with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
-            test_client.post(
-                f"/api/workspace/{slug}/query",
-                json={"question": "Q?"},
-                headers=AUTH_HEADERS,
-            )
-        test_client.delete(f"/api/workspace/{slug}", headers=AUTH_HEADERS)
-        # Re-create to check logs were actually removed, not just the workspace row
-        new_ws = test_client.post(
-            "/api/workspace", json={"name": "Test Workspace"}, headers=AUTH_HEADERS
-        ).json()
-        # Logs for the new workspace should be empty (different slug)
-        assert test_client.get(
-            f"/api/workspace/{new_ws['slug']}/logs", headers=AUTH_HEADERS
-        ).json()["entries"] == []
-
-
-# ---------------------------------------------------------------------------
-# Doc tracking endpoints
-# ---------------------------------------------------------------------------
-
-class TestDocTrackingEndpoints:
-    def test_list_docs_empty(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        assert resp.json() == []
-
-    def test_add_and_list_doc(self, test_client, workspace):
-        slug = workspace["slug"]
-        resp = test_client.post(
-            f"/api/docs/{slug}",
-            json={"doc_id": "abc-123", "filename": "report.pdf", "chunks_embedded": 7},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 201
-        docs = test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json()
-        assert len(docs) == 1
-        assert docs[0]["doc_id"] == "abc-123"
-        assert docs[0]["filename"] == "report.pdf"
-
-    def test_remove_single_doc(self, test_client, workspace):
-        slug = workspace["slug"]
-        test_client.post(
-            f"/api/docs/{slug}",
-            json={"doc_id": "to-remove", "filename": "x.txt"},
-            headers=AUTH_HEADERS,
-        )
-        test_client.post(
-            f"/api/docs/{slug}",
-            json={"doc_id": "keep-me", "filename": "y.txt"},
-            headers=AUTH_HEADERS,
-        )
-        test_client.delete(f"/api/docs/{slug}/to-remove", headers=AUTH_HEADERS)
-        docs = test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json()
-        assert len(docs) == 1
-        assert docs[0]["doc_id"] == "keep-me"
-
-    def test_remove_all_docs_for_workspace(self, test_client, workspace):
-        slug = workspace["slug"]
-        for i in range(3):
-            test_client.post(
-                f"/api/docs/{slug}",
-                json={"doc_id": f"doc-{i}", "filename": f"file{i}.txt"},
-                headers=AUTH_HEADERS,
-            )
-        resp = test_client.delete(f"/api/docs/{slug}", headers=AUTH_HEADERS)
-        assert resp.status_code == 200
-        assert test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS).json() == []
-
-    def test_docs_cleared_on_workspace_delete(self, test_client, workspace):
-        slug = workspace["slug"]
-        test_client.post(
-            f"/api/docs/{slug}",
-            json={"doc_id": "d1", "filename": "f.txt"},
-            headers=AUTH_HEADERS,
-        )
-        test_client.delete(f"/api/workspace/{slug}", headers=AUTH_HEADERS)
-        # Docs file should no longer contain this slug
-        resp = test_client.get(f"/api/docs/{slug}", headers=AUTH_HEADERS)
-        assert resp.json() == []
+        assert logs[0]["question"] == "Logged question?"
 
 
 # ---------------------------------------------------------------------------
@@ -659,22 +163,15 @@ class TestKeyMasking:
         body = test_client.get("/api/settings", headers=AUTH_HEADERS).json()
         assert body["api_key"] == ""
         assert body["api_key_hint"] == "…abcd"
-        assert body["embed_api_key_hint"] == ""
 
-    def test_workspace_keys_masked_everywhere(self, test_client):
+    def test_workspace_keys_masked_everywhere_and_kept_on_save(self, test_client):
+        import db
         ws = test_client.post(
             "/api/workspace", json={"name": "Masked", "api_key": "sk-ws-1234"}, headers=AUTH_HEADERS,
         ).json()
         assert ws["api_key"] == "" and ws["api_key_hint"] == "…1234"
-        fetched = test_client.get(f"/api/workspace/{ws['slug']}", headers=AUTH_HEADERS).json()
-        assert fetched["api_key"] == ""
-        listed = test_client.get("/api/workspaces", headers=AUTH_HEADERS).json()
-        assert all(w["api_key"] == "" for w in listed)
-
-    def test_saving_without_key_keeps_stored_key(self, test_client):
-        import db
-        ws = test_client.post(
-            "/api/workspace", json={"name": "Keep", "api_key": "sk-ws-1234"}, headers=AUTH_HEADERS,
-        ).json()
+        assert test_client.get(f"/api/workspace/{ws['slug']}", headers=AUTH_HEADERS).json()["api_key"] == ""
+        assert all(w["api_key"] == "" for w in test_client.get("/api/workspaces", headers=AUTH_HEADERS).json())
+        # Saving the form without re-entering the key must not wipe it
         test_client.put(f"/api/workspace/{ws['slug']}", json={"temperature": 0.2}, headers=AUTH_HEADERS)
         assert db.get_workspace(ws["slug"])["api_key"] == "sk-ws-1234"

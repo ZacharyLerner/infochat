@@ -246,11 +246,10 @@ def update_workspace(slug: str, **fields) -> Optional[dict]:
 
 
 def delete_workspace(slug: str) -> bool:
-    """Delete a workspace's settings, document records and logs. Returns True if it existed."""
+    """Delete everything under the workspace's prefix: settings, document records, logs,
+    and what the uploader and chat servers keep there. Returns True if it existed."""
     existed = get_workspace(slug) is not None
-    clear_logs(slug)
-    _delete(_ws_key(slug, "docs.json"))
-    _delete(_ws_key(slug, "settings.json"))
+    _delete_keys(_list_keys(_ws_key(slug, "")))
     return existed
 
 
@@ -414,7 +413,10 @@ def list_logs(
 
 
 def clear_logs(slug: str) -> None:
-    keys = _list_keys(_logs_prefix(slug))
+    _delete_keys(_list_keys(_logs_prefix(slug)))
+
+
+def _delete_keys(keys: list[str]) -> None:
     for i in range(0, len(keys), 1000):
         _s3().delete_objects(
             Bucket=config.S3_STATE_BUCKET,

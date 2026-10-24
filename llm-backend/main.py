@@ -493,6 +493,10 @@ class ChatSessionStreamRequest(BaseModel):
             "preventing oversized embeddings from exceeding the embedding model's context window."
         ),
     )
+    has_attachment: bool = Field(
+        default=False,
+        description="True when `message` carries an attached document: the LLM answers even if retrieval finds nothing.",
+    )
 
 
 @api_router.post("/workspace/{slug}/chat/session", summary="Create a new chat session")
@@ -526,6 +530,7 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
             session_id, ws, body.message,
             history=history,
             retrieval_query=body.retrieval_query,
+            has_attachment=body.has_attachment,
         ):
             if chunk.startswith("event: log\n"):
                 # Intercept the log event — write to S3, don't forward to browser
