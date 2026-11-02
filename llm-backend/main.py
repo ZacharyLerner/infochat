@@ -112,7 +112,8 @@ def verify_auth():
 
 # --- Model discovery ---------------------------------------------------------
 class ListModelsRequest(BaseModel):
-    api_key: str = Field(..., description="API key to look up available models for.")
+    api_key: str = Field("", description="API key to look up available models for. Blank uses the saved key: the workspace's when `workspace` is given, else the global one.")
+    workspace: Optional[str] = Field(None, description="Slug whose saved API key to use when `api_key` is blank.")
 
 
 @api_router.post("/models", summary="List models available to an API key")
@@ -123,11 +124,20 @@ async def list_models(body: ListModelsRequest):
     one are classified by name ("embed" in the id). Other modes (image, audio,
     rerank, ...) are left out.
     """
+    api_key = body.api_key
+    if not api_key:
+        # The settings pages never receive saved keys, so they ask for the stored one here
+        ws = db.get_workspace(body.workspace) if body.workspace else None
+        if body.workspace and ws is None:
+            raise HTTPException(status_code=404, detail="Workspace not found.")
+        api_key = (ws or db.get_settings())["api_key"]
+    if not api_key:
+        raise HTTPException(status_code=400, detail="No API key saved. Enter one to load the available models.")
     try:
         async with _httpx.AsyncClient(timeout=15) as client:
             res = await client.get(
                 f"{config.API_BASE.rstrip('/')}/models",
-                headers={"Authorization": f"Bearer {body.api_key}"},
+                headers={"Authorization": f"Bearer {api_key}"},
             )
     except _httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Could not reach LLM gateway: {exc}")

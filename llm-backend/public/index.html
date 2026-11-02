@@ -89,7 +89,7 @@
           <form id="workspace-settings-form" class="settings-form">
             <div class="form-row">
               <label>LLM Model</label>
-              <input type="text" name="llm_model" />
+              <select name="llm_model"><option value="">Not set</option></select>
             </div>
             <div class="form-row">
               <label>API Key</label>
@@ -139,8 +139,8 @@
 
             <div class="form-section-divider">Query Rewriting</div>
             <div class="form-row">
-              <label>Rewrite Model <span class="muted">(leave blank to disable)</span></label>
-              <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
+              <label>Rewrite Model <span class="muted">(choose Disabled to turn off)</span></label>
+              <select name="rewrite_model"><option value="">Disabled</option></select>
             </div>
             <div class="form-row full-width">
               <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
@@ -333,7 +333,7 @@
         <form id="global-settings-form" class="settings-form">
           <div class="form-row">
             <label>LLM Model</label>
-            <input type="text" name="llm_model" />
+            <select name="llm_model"><option value="">Not set</option></select>
           </div>
           <div class="form-row">
             <label>API Key</label>
@@ -353,7 +353,7 @@
           </div>
           <div class="form-row">
             <label>Embed Model</label>
-            <input type="text" name="embed_model" />
+            <select name="embed_model"><option value="">Not set</option></select>
           </div>
           <div class="form-row">
             <label>Embed API Key</label>
@@ -383,8 +383,8 @@
 
           <div class="form-section-divider">Query Rewriting</div>
           <div class="form-row">
-            <label>Rewrite Model <span class="muted">(leave blank to disable)</span></label>
-            <input type="text" name="rewrite_model" placeholder="e.g. openai/gpt-4o-mini" />
+            <label>Rewrite Model <span class="muted">(choose Disabled to turn off)</span></label>
+            <select name="rewrite_model"><option value="">Disabled</option></select>
           </div>
           <div class="form-row full-width">
             <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>

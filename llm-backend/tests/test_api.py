@@ -175,3 +175,39 @@ class TestKeyMasking:
         # Saving the form without re-entering the key must not wipe it
         test_client.put(f"/api/workspace/{ws['slug']}", json={"temperature": 0.2}, headers=AUTH_HEADERS)
         assert db.get_workspace(ws["slug"])["api_key"] == "sk-ws-1234"
+
+
+# ---------------------------------------------------------------------------
+# Model discovery
+# ---------------------------------------------------------------------------
+
+class TestListModels:
+    def _gateway(self, seen_keys):
+        class FakeGateway:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *exc): pass
+
+            async def get(self, url, headers):
+                seen_keys.append(headers["Authorization"])
+                class Res:
+                    status_code = 200
+                    def json(self):
+                        return {"data": [{"id": "openai/gpt-4o"}, {"id": "text-embed-3"}]}
+                return Res()
+        return patch("main._httpx.AsyncClient", FakeGateway)
+
+    def test_blank_key_uses_saved_workspace_then_global_key(self, test_client):
+        test_client.put("/api/settings", json={"api_key": "sk-global"}, headers=AUTH_HEADERS)
+        ws = test_client.post("/api/workspace", json={"name": "Models", "api_key": "sk-ws"}, headers=AUTH_HEADERS).json()
+        seen = []
+        with self._gateway(seen):
+            res = test_client.post("/api/models", json={"workspace": ws["slug"]}, headers=AUTH_HEADERS)
+            test_client.post("/api/models", json={}, headers=AUTH_HEADERS)
+            test_client.post("/api/models", json={"api_key": "sk-typed", "workspace": ws["slug"]}, headers=AUTH_HEADERS)
+        assert res.json() == {"llm_models": ["openai/gpt-4o"], "embedding_models": ["text-embed-3"]}
+        assert seen == ["Bearer sk-ws", "Bearer sk-global", "Bearer sk-typed"]
+
+    def test_unknown_workspace_and_missing_key_are_rejected(self, test_client):
+        assert test_client.post("/api/models", json={"workspace": "nope"}, headers=AUTH_HEADERS).status_code == 404
+        assert test_client.post("/api/models", json={}, headers=AUTH_HEADERS).status_code == 400

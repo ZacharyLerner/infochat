@@ -457,6 +457,7 @@ async function loadWorkspaceSettings(slug) {
   if (!wsRes.ok) return;
   const ws = await wsRes.json();
   fillForm(workspaceSettingsForm, ws);
+  loadSettingsModels(workspaceSettingsForm, wsSettingsMsg, ws, slug);
 
   let defaults = null;
   if (defaultsRes.ok) {
@@ -488,6 +489,10 @@ async function loadWorkspaceSettings(slug) {
     });
   }
 }
+
+workspaceSettingsForm.elements['api_key'].addEventListener('change', () => {
+  loadSettingsModels(workspaceSettingsForm, wsSettingsMsg, currentModels(workspaceSettingsForm), currentWorkspaceSlug);
+});
 
 workspaceSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -565,6 +570,47 @@ const _DEFAULT_OPTION = '<option value="">Use global default</option>';
 function setSelectOptions(select, models, defaultOption = _DEFAULT_OPTION) {
   select.innerHTML = defaultOption;
   models.forEach(m => select.add(new Option(m, m)));
+}
+
+// Settings pages: fill the model dropdowns from the key in the API Key field, or the
+// saved key when it's blank. The saved choice stays selected even if the key can't use it.
+const _SETTINGS_MODEL_FIELDS = [
+  ['llm_model', 'llm_models'],
+  ['embed_model', 'embedding_models'],
+  ['rewrite_model', 'llm_models'],
+];
+
+async function loadSettingsModels(form, msgEl, current, workspace) {
+  const selects = _SETTINGS_MODEL_FIELDS
+    .map(([name, list]) => [form.elements[name], list, current[name] || ''])
+    .filter(([el]) => el && el.tagName === 'SELECT');
+  // Show the saved choice right away, so saving before the list loads keeps it
+  const defaults = new Map(selects.map(([el]) => [el, el.options[0].outerHTML]));
+  selects.forEach(([el, , value]) => {
+    setSelectOptions(el, value ? [value] : [], defaults.get(el));
+    el.value = value;
+  });
+
+  const res = await apiFetch('/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: form.elements['api_key'].value.trim(), workspace }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showMsg(msgEl, `Could not load models: ${err.detail || res.status}`, 'error');
+    return;
+  }
+  const models = await res.json();
+  selects.forEach(([el, list, value]) => {
+    setSelectOptions(el, models[list], defaults.get(el));
+    if (value && !models[list].includes(value)) el.add(new Option(`${value} (not available to this key)`, value));
+    el.value = value;
+  });
+}
+
+function currentModels(form) {
+  return Object.fromEntries(_SETTINGS_MODEL_FIELDS.map(([name]) => [name, form.elements[name].value]));
 }
 
 function resetModelSelects() {
@@ -1137,6 +1183,7 @@ async function loadGlobalSettings() {
   if (!settingsRes.ok) return;
   const settings = await settingsRes.json();
   fillForm(globalSettingsForm, settings);
+  loadSettingsModels(globalSettingsForm, globalSettingsMsg, settings);
 
   let defaults = null;
   if (defaultsRes.ok) {
@@ -1168,6 +1215,10 @@ async function loadGlobalSettings() {
     });
   }
 }
+
+globalSettingsForm.elements['api_key'].addEventListener('change', () => {
+  loadSettingsModels(globalSettingsForm, globalSettingsMsg, currentModels(globalSettingsForm));
+});
 
 globalSettingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
