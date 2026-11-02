@@ -16,7 +16,7 @@ import anythingllm
 from models import ChatRequest, ChatSessionRequest, SendEmailRequest
 import store
 from schemas import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
-from config import LLM_GW_URL, LLM_GW_KEY
+from config import LLM_GW_URL, LLM_GW_KEY, ROOT_PATH
 import file_processor
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,28 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+
+class RootPathMiddleware:
+    """Serve the app under ROOT_PATH (e.g. /chat behind the load balancer) as well as at /.
+
+    Requests without the prefix get it added, so routing works whether or not the load
+    balancer strips it, and templates build links from request.scope["root_path"].
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if ROOT_PATH and scope["type"] in ("http", "websocket"):
+            path = scope["path"]
+            if path != ROOT_PATH and not path.startswith(ROOT_PATH + "/"):
+                path = ROOT_PATH + path
+            scope = {**scope, "root_path": ROOT_PATH, "path": path}
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RootPathMiddleware)
 
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ from botocore.exceptions import ClientError
 from config import AWS_REGION, S3_STATE_BUCKET
 
 _PREFIX = "workspaces/"
-_MAX_RETRIES = 10
+_MAX_RETRIES = 30  # files.json takes one write per scraped URL and per conversion result
 
 # shortcut: a job whose run crashed stays "running" until this lease expires; raise it if
 # a single job run can legitimately take longer.
@@ -186,6 +186,7 @@ def update_file(slug: str, key: str, fn: Callable[[dict], dict]) -> Optional[dic
     found = []
 
     def apply(files):
+        found.clear()  # apply reruns on each conflict retry; keep only the attempt that wins
         out = []
         for f in files:
             if f["key"] == key:

@@ -289,7 +289,7 @@ function pollConverting() {
         }
         let files;
         try {
-            const res = await fetch(`/api/v1/workspaces/${WORKSPACE_ID}`);
+            const res = await fetch(`${BASE}/api/v1/workspaces/${WORKSPACE_ID}`);
             if (!res.ok) return;
             files = (await res.json()).files;
         } catch (e) {
@@ -328,7 +328,7 @@ function attachDeleteHandler(btn) {
         e.stopPropagation();
         if (!confirm("Delete this document?")) return;
 
-        const res = await fetch(`/${WORKSPACE_ID}/delete/${btn.dataset.id}`, { method: "DELETE" });
+        const res = await fetch(`${BASE}/${WORKSPACE_ID}/delete/${btn.dataset.id}`, { method: "DELETE" });
 
         if (res.ok) {
             const card = btn.closest(".file_card");
@@ -443,7 +443,7 @@ bulkDeleteBtn.addEventListener("click", async () => {
         : "Removing from workspace...";
     deleteOverlay.classList.add("visible");
 
-    const res = await fetch(`/${WORKSPACE_ID}/delete-bulk`, {
+    const res = await fetch(`${BASE}/${WORKSPACE_ID}/delete-bulk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file_ids: fileIds }),
@@ -934,9 +934,9 @@ function insertJobCard(job, workspaceId, startRunning = false) {
     const card = document.createElement("div");
     card.className = "scrape-job-card" + (startRunning ? " job-running" : "");
     card.dataset.jobId = job.id;
-    card.dataset.runUrl = `/${workspaceId}/scrape/jobs/${job.id}/run`;
-    card.dataset.patchUrl = `/${workspaceId}/scrape/jobs/${job.id}`;
-    card.dataset.deleteUrl = `/${workspaceId}/scrape/jobs/${job.id}`;
+    card.dataset.runUrl = `${BASE}/${workspaceId}/scrape/jobs/${job.id}/run`;
+    card.dataset.patchUrl = `${BASE}/${workspaceId}/scrape/jobs/${job.id}`;
+    card.dataset.deleteUrl = `${BASE}/${workspaceId}/scrape/jobs/${job.id}`;
 
     const scheduleOpts = [
         { value: "", label: "Manual" },
@@ -1225,7 +1225,7 @@ function renderJobPages(listEl, pages, card) {
                 const btn = e.currentTarget;
                 btn.disabled = true;
 
-                const res = await fetch(`/${WORKSPACE_ID}/delete/${page.id}`, { method: "DELETE" });
+                const res = await fetch(`${BASE}/${WORKSPACE_ID}/delete/${page.id}`, { method: "DELETE" });
                 if (res.ok) {
                     // Remove from local pages array so re-renders stay accurate
                     const idx = pages.findIndex(p => p.id === page.id);
@@ -1325,7 +1325,7 @@ async function runJobById(jobId, workspaceId) {
     card.querySelector(".scrape-job-failures")?.remove();
     const failures = [];
 
-    const runUrl = `/${workspaceId}/scrape/jobs/${jobId}/run`;
+    const runUrl = `${BASE}/${workspaceId}/scrape/jobs/${jobId}/run`;
 
     try {
         const res = await fetch(runUrl, { method: "POST" });
@@ -1453,7 +1453,7 @@ async function runJobById(jobId, workspaceId) {
 
 async function refreshJobCardMeta(card, jobId, workspaceId) {
     try {
-        const res = await fetch(`/${workspaceId}/scrape/jobs`);
+        const res = await fetch(`${BASE}/${workspaceId}/scrape/jobs`);
         if (!res.ok) return;
         const jobs = await res.json();
         const job = jobs.find(j => j.id === jobId);
@@ -1474,7 +1474,7 @@ function startPollingIfNeeded() {
 
     const interval = setInterval(async () => {
         try {
-            const res = await fetch(`/${workspaceId}/scrape/jobs`);
+            const res = await fetch(`${BASE}/${workspaceId}/scrape/jobs`);
             if (!res.ok) return;
             const jobs = await res.json();
             const jobMap = Object.fromEntries(jobs.map(j => [j.id, j]));

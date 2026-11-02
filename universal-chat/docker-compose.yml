@@ -7,5 +7,8 @@ services:
     ports:
       - "3000:3000"
     env_file: .env
+    environment:
+      # Served at https://infochat.its.uri.edu/chat/ (path routing on the campus load balancer).
+      - ROOT_PATH=/chat
     # No local state: chat settings live in S3 (store.py); attachments go to the docling Lambda.
     restart: unless-stopped

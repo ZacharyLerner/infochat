@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', path='css/main.css') }}?v=5">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', path='css/main.css').path }}?v=5">
     <title>{{ workspace.name }} - Settings</title>
     <style>
         body { padding: 0; min-height: 100vh; }
@@ -122,7 +122,7 @@
 <div class="settings-chrome">
 
     <div class="settings-topbar">
-        <a class="settings-back-link" href="/{{ workspace.id }}">
+        <a class="settings-back-link" href="{{ request.scope.root_path }}/{{ workspace.id }}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
             Back
         </a>
@@ -177,6 +177,7 @@
 </div>
 
 <script>
+const BASE = "{{ request.scope.root_path }}";
 const workspaceId = document.querySelector(".settings-body").dataset.workspace;
 
 const promptEl  = document.getElementById("settingPrompt");
@@ -230,7 +231,7 @@ document.querySelector(".settings-back-link").addEventListener("click", e => {
 const fields = [promptEl, topNEl, topNInput, tempEl, tempInput, simEl];
 fields.forEach(f => f.disabled = true);
 
-fetch(`/api/v1/workspaces/${workspaceId}/settings`)
+fetch(`${BASE}/api/v1/workspaces/${workspaceId}/settings`)
     .then(res => { if (!res.ok) throw new Error(`${res.status}`); return res.json(); })
     .then(data => {
         promptEl.value = data.prompt || "";
@@ -257,7 +258,7 @@ async function doSave(btn) {
     btn.disabled = true;
     btn.textContent = "Saving...";
     try {
-        const res = await fetch(`/api/v1/workspaces/${workspaceId}/settings`, {
+        const res = await fetch(`${BASE}/api/v1/workspaces/${workspaceId}/settings`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -270,7 +271,7 @@ async function doSave(btn) {
         if (!res.ok) throw new Error(`${res.status}`);
         markClean();
         btn.textContent = "Saved!";
-        setTimeout(() => { window.location.href = `/${workspaceId}`; }, 500);
+        setTimeout(() => { window.location.href = `${BASE}/${workspaceId}`; }, 500);
     } catch (err) {
         console.error(err);
         isSaving = false;

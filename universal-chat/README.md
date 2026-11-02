@@ -48,7 +48,7 @@ docker compose logs -f chat
 Plain `docker compose up -d --build` also merges `docker-compose.override.yml`, the development
 setup: the source folder is mounted into the container and uvicorn reloads on every change.
 The container restarts on failure and after a reboot. After `git pull`, run the same
-`up -d --build` again. Server at `http://<host>:3000`.
+`up -d --build` again. Server at `https://<host>:3000` (self-signed cert; `ROOT_PATH` adds the `/chat` prefix).
 
 Credentials from an EC2 instance role only reach a container if the instance's metadata
 hop limit is at least 2

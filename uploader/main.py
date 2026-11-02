@@ -22,7 +22,7 @@ from anythingllm import (
     LLM_update_workspace_settings,
     LLM_delete_workspace,
 )
-from config import APP_API_KEY, TEXT_EXTENSIONS, MAX_UPLOAD_BYTES
+from config import APP_API_KEY, TEXT_EXTENSIONS, MAX_UPLOAD_BYTES, ROOT_PATH
 from decling_conversion import docling_filename, fetch_page, DOCLING_SUFFIX
 from schemas import (
     FileResponse,
@@ -45,6 +45,28 @@ NY = ZoneInfo("America/New_York")
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+class RootPathMiddleware:
+    """Serve the app under ROOT_PATH (e.g. /upload behind the load balancer) as well as at /.
+
+    Requests without the prefix get it added, so routing works whether or not the load
+    balancer strips it, and templates build links from request.scope["root_path"].
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if ROOT_PATH and scope["type"] in ("http", "websocket"):
+            path = scope["path"]
+            if path != ROOT_PATH and not path.startswith(ROOT_PATH + "/"):
+                path = ROOT_PATH + path
+            scope = {**scope, "root_path": ROOT_PATH, "path": path}
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RootPathMiddleware)
 
 # Semaphores
 SEM = asyncio.Semaphore(10)
@@ -270,13 +292,6 @@ def _new_file_record(workspace_id: str, **fields) -> dict:
     }
 
 
-def _upsert_by_key(files: list[dict], records: list[dict]) -> list[dict]:
-    """Replace records with the same key, append the rest."""
-    by_key = {r["key"]: r for r in records}
-    present = {f["key"] for f in files}
-    return [by_key.get(f["key"], f) for f in files] + [r for r in records if r["key"] not in present]
-
-
 def _with_datetimes(record: dict, *fields) -> dict:
     """Copy of record with ISO strings parsed, for templates that call .strftime()."""
     return {**record, **{f: datetime.fromisoformat(record[f]) for f in fields if record.get(f)}}
@@ -308,10 +323,18 @@ async def _add_document(workspace_id: str, filename: str, content: bytes) -> dic
             )
         else:
             record["status"] = "converting"
-            await asyncio.to_thread(conversion.send_job, record, docling_filename(filename))
+        # Saved before the job is sent: a fast conversion can come back before send_job
+        # returns, and conversion.handle_result drops results whose record it can't find.
+        await asyncio.to_thread(store.add_files, workspace_id, [record])
     except Exception:
         await asyncio.to_thread(store.delete_objects, [record[field]])
         raise
+    if not text:
+        try:
+            await asyncio.to_thread(conversion.send_job, record, docling_filename(filename))
+        except Exception:
+            await asyncio.to_thread(store.remove_files, workspace_id, [record["key"]])  # and its original
+            raise
     return record
 
 
@@ -384,7 +407,6 @@ async def processes_file(content, fname, workspace_id, queue):
                     "key": record["key"],
                     "name": fname,
                     "original_extension": record["original_extension"],
-                    "_file_record": record,
                 }
             )
         except Exception as e:
@@ -400,7 +422,6 @@ async def processes_file(content, fname, workspace_id, queue):
 
 async def _stream_upload_progress(file_data, workspace_id):
     queue = asyncio.Queue()
-    completed_records = []
     valid_files = []
     rejected_events = []
 
@@ -434,12 +455,7 @@ async def _stream_upload_progress(file_data, workspace_id):
         event = await queue.get()
         if event is None:
             break
-        record = event.pop("_file_record", None)
-        if record is not None:
-            completed_records.append(record)
         yield f"data: {json.dumps(event)}\n\n"
-
-    await asyncio.to_thread(store.add_files, workspace_id, completed_records)
 
     yield "data: [DONE]\n\n"
     await task
@@ -756,11 +772,12 @@ async def delete_scrape_job(workspace_id: str, job_id: str):
 # Scrape Job: Run (smart change detection)
 # ---------------------------------------------------------------------------
 
-async def _process_job_url(url, job, existing_files, queue):
+async def _fetch_job_url(url, job, existing_files, queue):
     """
-    Fetch one URL for a job run, store the page as fetched as a temporary
-    original, and queue it for conversion. Whether the page changed is decided
-    when the result comes back (conversion.handle_result compares content hashes).
+    Fetch one URL for a job run and store the page as fetched as a temporary
+    original. Returns the page to save and convert, or None if the fetch failed.
+    Whether the page changed is decided when the result comes back
+    (conversion.handle_result compares content hashes).
     """
     async with SEM:
         workspace_id = job["workspace_id"]
@@ -769,7 +786,8 @@ async def _process_job_url(url, job, existing_files, queue):
             content, content_type = await asyncio.to_thread(fetch_page, url)
 
             filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
-            record = existing_files.get(url) or _new_file_record(
+            existing = existing_files.get(url)
+            record = existing or _new_file_record(
                 workspace_id,
                 filename=filename,
                 original_extension=".html",
@@ -784,20 +802,52 @@ async def _process_job_url(url, job, existing_files, queue):
                 workspace_id, record["key"], f"{uuid.uuid4().hex[:8]}/{_sanitize_url_to_filename(url)}"
             )
             await asyncio.to_thread(store.put_object, original, content)
-            record = {**record, "original": original, "filename": filename}
-            await asyncio.to_thread(conversion.send_job, record, filename, scraped=True, content_type=content_type)
-
-            await queue.put({
+            return {
                 "url": url,
-                "status": "queued",
-                "name": filename,
-                "category": job["name"],
-                "_file_record": record,
-            })
-
+                "record": {**record, "original": original, "filename": filename},
+                "existing": existing is not None,
+                "content_type": content_type,
+            }
         except Exception as e:
             print(f"[job-run] error processing {url}: {e}")
             await queue.put({"url": url, "status": "error", "message": str(e)})
+            return None
+
+
+def _save_job_pages(files: list[dict], pages: list[dict]) -> list[dict]:
+    """Add a run's new pages and point its existing ones at their new originals. An
+    existing page gets only the fields this run sets, so a result applied in the
+    meantime isn't overwritten."""
+    by_key = {p["record"]["key"]: p["record"] for p in pages}
+    updated = [
+        {**f, "original": by_key[f["key"]]["original"], "filename": by_key[f["key"]]["filename"]}
+        if f["key"] in by_key else f
+        for f in files
+    ]
+    present = {f["key"] for f in files}
+    return updated + [p["record"] for p in pages if not p["existing"] and p["record"]["key"] not in present]
+
+
+def _unsave_job_pages(files: list[dict], pages: list[dict]) -> list[dict]:
+    """Undo _save_job_pages for pages whose job couldn't be sent."""
+    originals = {p["record"]["key"]: p["record"]["original"] for p in pages}
+    new_keys = {p["record"]["key"] for p in pages if not p["existing"]}
+    return [
+        {**f, "original": None} if f.get("original") == originals.get(f["key"]) else f
+        for f in files if f["key"] not in new_keys
+    ]
+
+
+async def _send_job_page(page, job):
+    async with SEM:
+        record = page["record"]
+        try:
+            await asyncio.to_thread(conversion.send_job, record, record["filename"],
+                                    scraped=True, content_type=page["content_type"])
+            return {"url": page["url"], "status": "queued", "name": record["filename"], "category": job["name"]}
+        except Exception as e:
+            print(f"[job-run] error queueing {page['url']}: {e}")
+            return None
 
 
 async def _job_run_events(job: dict):
@@ -835,33 +885,41 @@ async def _job_run_events(job: dict):
         if stale:
             await asyncio.to_thread(store.remove_files, workspace_id, [f["key"] for f in stale])
 
-        # Process each URL
+        # Fetch every page, then save all their records in one write: files.json is a single
+        # object, so a write per page would make every page race for it. Records are saved
+        # before the jobs are sent (see _add_document).
         queue = asyncio.Queue()
-        file_records = []
 
-        async def run_all():
-            coros = [
-                _process_job_url(url, job, existing_files, queue)
-                for url in urls
-            ]
-            await asyncio.gather(*coros, return_exceptions=True)
+        async def fetch_all():
+            pages = await asyncio.gather(*(_fetch_job_url(url, job, existing_files, queue) for url in urls))
             await queue.put(None)
+            return [p for p in pages if p]
 
-        task = asyncio.create_task(run_all())
+        task = asyncio.create_task(fetch_all())
 
         while True:
             event = await queue.get()
             if event is None:
                 break
-
-            rec = event.pop("_file_record", None)
-            if rec is not None:
-                file_records.append(rec)
             yield event
 
-        # Persist all file records
-        await asyncio.to_thread(store.update_files, workspace_id, lambda files: _upsert_by_key(files, file_records))
-        await task
+        pages = await task
+        if pages:
+            try:
+                await asyncio.to_thread(store.update_files, workspace_id, lambda files: _save_job_pages(files, pages))
+            except Exception as e:
+                await asyncio.to_thread(store.delete_objects, [p["record"]["original"] for p in pages])
+                for p in pages:
+                    yield {"url": p["url"], "status": "error", "message": str(e)}
+                pages = []
+
+        sent = await asyncio.gather(*(_send_job_page(p, job) for p in pages))
+        failed = [p for p, event in zip(pages, sent) if event is None]
+        if failed:
+            await asyncio.to_thread(store.update_files, workspace_id, lambda files: _unsave_job_pages(files, failed))
+            await asyncio.to_thread(store.delete_objects, [p["record"]["original"] for p in failed])
+        for p, event in zip(pages, sent):
+            yield event or {"url": p["url"], "status": "error", "message": "could not queue for conversion"}
 
     finally:
         await asyncio.to_thread(store.release_job, workspace_id, job_id, _next_run_iso)
@@ -975,7 +1033,6 @@ async def upload_to_workspace(
     for f, content in zip(uploaded_files, contents):
         saved_files.append(await _add_document(workspace_id, f.filename, content))
 
-    await asyncio.to_thread(store.add_files, workspace_id, saved_files)
     return saved_files
 
 

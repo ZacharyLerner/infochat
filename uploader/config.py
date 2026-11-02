@@ -47,3 +47,6 @@ MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB
 # conversion (they can be uploaded directly to the RAG backend).
 # ---------------------------------------------------------------------------
 TEXT_EXTENSIONS: set[str] = {".txt", ".json", ".xml", ".md", ".csv"}
+
+# Path prefix the load balancer routes to this app (https://infochat.its.uri.edu/{prefix}/...).
+ROOT_PATH: str = os.getenv("ROOT_PATH", "").rstrip("/")

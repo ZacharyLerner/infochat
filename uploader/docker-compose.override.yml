@@ -10,3 +10,6 @@ services:
       --port 3000
       --reload
       --reload-exclude venv
+  # No scheduler locally: it would start the real scrape jobs in the shared S3 bucket.
+  scheduler:
+    profiles: [disabled]

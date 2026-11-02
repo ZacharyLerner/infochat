@@ -1,11 +1,33 @@
-# Infochat uploader. Usage: create .env (see README.md), then docker compose up -d
-# Locally, docker-compose.override.yml is merged in automatically (source mount + reload);
+# Infochat uploader and its scrape scheduler. Usage: create .env (see README.md), then docker compose up -d
+# Locally, docker-compose.override.yml is merged in automatically (source mount + reload, no scheduler);
 # in production use: docker compose -f docker-compose.yml up -d --build
 services:
   uploader:
     build: .
     ports:
-      - "3000:3000"
+      - "3001:3000"
     env_file: .env
+    environment:
+      # Served at https://infochat.its.uri.edu/upload/ (path routing on the campus load balancer).
+      - ROOT_PATH=/upload
     # No local state: records and documents live in S3 (store.py), conversions go through SQS.
+    # The certs volume starts as a copy of the image's self-signed cert and shares it with the scheduler.
+    volumes:
+      - certs:/certs
     restart: unless-stopped
+
+  # Starts due scrape jobs once a minute (see ../scheduler). Run exactly one per deployment.
+  scheduler:
+    build: ../scheduler
+    env_file: .env   # APP_API_KEY
+    environment:
+      - UPLOADER_URL=https://uploader:3000
+      - SSL_CERT_FILE=/certs/cert.pem
+    volumes:
+      - certs:/certs:ro
+    depends_on:
+      - uploader
+    restart: unless-stopped
+
+volumes:
+  certs:

@@ -76,7 +76,9 @@ docker compose logs -f uploader
 Plain `docker compose up -d --build` also merges `docker-compose.override.yml`, the development
 setup: the source folder is mounted into the container and uvicorn reloads on every change.
 The container restarts on failure and after a reboot. After `git pull`, run the same
-`up -d --build` again. Server at `http://<host>:3000`, docs at `/docs`.
+`up -d --build` again. Server at `https://<host>:3001` (self-signed cert; `ROOT_PATH` adds the `/upload` prefix), docs at `/docs`.
+Compose also starts the scheduler (section 4), built from `../scheduler`, so check out both folders:
+`git sparse-checkout set uploader scheduler`.
 
 Credentials from an EC2 instance role only reach a container if the instance's metadata
 hop limit is at least 2
@@ -89,7 +91,7 @@ then `venv/bin/fastapi run main.py --host 0.0.0.0 --port 3000` (`fastapi dev` fo
 ## 4. Scheduled scrapes
 
 Uploader servers don't schedule anything themselves. The [`scheduler`](../scheduler) service,
-run on **one** host, calls `POST /api/v1/scrape/run-due` once a minute; the uploader claims each
+started by this folder's compose file on **one** host, calls `POST /api/v1/scrape/run-due` once a minute; the uploader claims each
 due job with an S3 conditional write, so a job never runs twice at once. Without a scheduler,
 schedules never fire (manual runs still work).
 

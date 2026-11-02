@@ -27,3 +27,6 @@ DOCLING_FUNCTION_NAME: str = os.getenv("DOCLING_FUNCTION_NAME", "docling-md-conv
 # ---------------------------------------------------------------------------
 LLM_GW_URL: str = os.getenv("LLM_GW_URL")
 LLM_GW_KEY: str = os.getenv("LLM_GW_KEY")
+
+# Path prefix the load balancer routes to this app (https://infochat.its.uri.edu/{prefix}/...).
+ROOT_PATH: str = os.getenv("ROOT_PATH", "").rstrip("/")

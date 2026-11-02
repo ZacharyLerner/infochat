@@ -66,12 +66,15 @@ class FakePipeline:
 
     def __init__(self):
         self.jobs = []
+        self.instant = False  # True: convert inside send_job, as a fast Lambda can
 
     def send_job(self, record, llm_name, *, scraped=False, content_type=""):
         output_key = store.converted_key(record["workspace_id"], record["key"], llm_name)
         self.jobs.append({"key": record["original"], "output_key": output_key, "scraped": scraped,
                           "source_url": record.get("source_url"),
                           "context": {"workspace_id": record["workspace_id"], "key": record["key"]}})
+        if self.instant:
+            self.run()
         return output_key
 
     def run(self, fail=None):
@@ -239,6 +242,38 @@ def test_delete_while_converting_drops_late_result(client, pipeline, backend, fa
     assert not [k for k in fake_s3.objects if f"/{rec['key']}/" in k]
 
 
+def test_result_arriving_before_upload_finishes_is_applied(client, pipeline, backend, fake_s3):
+    pipeline.instant = True
+    r = client.post(f"/{WS}/uploadfiles/", files=[
+        ("uploaded_files", (name, io.BytesIO(b"%PDF-fake"), "application/pdf")) for name in ("a.pdf", "b.pdf")])
+    assert r.status_code == 200
+    files = store.list_files(WS)
+    assert len(files) == 2 and {f["status"] for f in files} == {"ready"}
+    assert all(f["id"] in backend and f["converted"] in fake_s3.objects for f in files)
+
+
+def test_scrape_result_arriving_mid_run_is_kept(client, pages, pipeline, backend):
+    pages["https://a.example/one"] = "<p>v1</p>"
+    job = _job(client)
+    _run(client, job["id"])
+    pipeline.run()
+    pipeline.instant = True
+    pages["https://a.example/one"] = "<p>v2</p>"
+    _run(client, job["id"])
+    [page] = store.list_files(WS)
+    assert page["status"] == "ready" and page["id"] in backend and page["original"] is None
+    assert "v2" in store.get_object(page["converted"]).decode()
+
+
+def test_failed_send_leaves_no_record(client, fake_s3, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("queue down")
+    monkeypatch.setattr(conversion, "send_job", boom)
+    r = client.post(f"/{WS}/uploadfiles/", files=[("uploaded_files", ("a.pdf", io.BytesIO(b"%PDF"), "application/pdf"))])
+    assert "queue down" in r.text
+    assert store.list_files(WS) == [] and _originals(fake_s3) == []
+
+
 def test_success_for_deleted_record_removes_output(client, backend, fake_s3):
     output_key = store.converted_key(WS, "gone", "report.docling.json")
     store.put_object(output_key, b"{}")
@@ -296,6 +331,29 @@ def test_run_tracks_new_changed_unchanged_and_removed_pages(client, pages, pipel
     finished = store.get_job(WS, job["id"])
     assert finished["is_running"] is False and finished["last_scraped_at"]
     assert events[-1]["status"] == "done" and events[-1]["page_count"] == 1
+
+
+def test_run_saves_records_in_one_write_and_rolls_back_failed_sends(client, pages, pipeline, fake_s3, monkeypatch):
+    pages["https://a.example/one"] = "<p>one</p>"
+    pages["https://a.example/two"] = "<p>two</p>"
+    job = _job(client, urls=["https://a.example/one", "https://a.example/two"])
+    writes = []
+    real_update_files = store.update_files
+    monkeypatch.setattr(store, "update_files", lambda *a: writes.append(1) or real_update_files(*a))
+    real_send = pipeline.send_job
+
+    def send_one_fails(record, *a, **k):
+        if "a_example_two" in record["filename"]:
+            raise RuntimeError("queue down")
+        return real_send(record, *a, **k)
+    monkeypatch.setattr(conversion, "send_job", send_one_fails)
+
+    events = {e["url"]: e["status"] for e in _run(client, job["id"]) if e.get("status") in ("queued", "error")}
+    assert events == {"https://a.example/one": "queued", "https://a.example/two": "error"}
+    assert len(writes) == 2  # one save for the run, one rollback for the failed send
+    [page] = store.list_files(WS)
+    assert page["source_url"] == "https://a.example/one"
+    assert _originals(fake_s3) == [page["original"]]
 
 
 def test_overlapping_runs_keep_each_others_originals(client, pages, pipeline, backend, fake_s3):
@@ -396,3 +454,14 @@ def test_delete_workspace_removes_all_uploader_objects(client, fake_s3, monkeypa
     monkeypatch.setattr(main, "LLM_delete_workspace", lambda ws: type("R", (), {"status_code": 200})())
     assert client.delete(f"/api/v1/workspaces/{WS}").status_code == 200
     assert not [k for k in fake_s3.objects if k.startswith(f"workspaces/{WS}/uploader/")]
+
+
+def test_pages_work_under_root_path(client, monkeypatch):
+    monkeypatch.setattr(main, "ROOT_PATH", "/upload")
+    # The load balancer may or may not strip /upload; links must carry it either way.
+    for url in (f"/upload/{WS}", f"/{WS}"):
+        r = client.get(url)
+        assert r.status_code == 200
+        assert f'data-url="/upload/{WS}/uploadfiles/"' in r.text and 'const BASE = "/upload"' in r.text
+    assert client.get("/upload/static/css/main.css").status_code == 200
+    assert client.get(f"/upload/api/v1/workspaces/{WS}").status_code == 200

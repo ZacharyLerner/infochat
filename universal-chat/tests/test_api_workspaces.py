@@ -94,3 +94,17 @@ class TestStore:
         # llm-backend's own files share the workspaces/<slug>/ prefix
         fake_s3.put_object(Bucket="b", Key="workspaces/backend-only/workspace.json", Body=b"{}")
         assert [ws["slug"] for ws in store.list_workspaces()] == ["chat"]
+
+
+def test_pages_and_api_work_under_root_path(client, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "ROOT_PATH", "/chat")
+    _create_ws(client, slug="demo")
+    # The load balancer may or may not strip /chat; links must carry it either way.
+    for url in ("/chat/demo", "/demo"):
+        r = client.get(url)
+        assert r.status_code == 200
+        assert 'href="/chat/static/css/main.css' in r.text and 'const BASE = "/chat"' in r.text
+    assert client.get("/chat/static/css/main.css").status_code == 200
+    assert client.get("/chat/api/workspaces/demo").status_code == 200
+    assert client.get("/api/workspaces/demo").status_code == 200

@@ -30,8 +30,8 @@
     })();
 
   const scriptSrc = scriptTag ? scriptTag.src : "";
-  // Strip path — keep only https://host:port
-  const serverOrigin = scriptSrc ? new URL(scriptSrc).origin : window.location.origin;
+  // The script's folder, e.g. https://host/chat when served from https://host/chat/embed.js
+  const serverOrigin = scriptSrc ? new URL(".", scriptSrc).href.replace(/\/$/, "") : window.location.origin;
 
   const slug = scriptTag ? scriptTag.getAttribute("data-workspace") : null;
   if (!slug) {

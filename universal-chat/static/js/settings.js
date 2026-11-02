@@ -4,7 +4,7 @@ const MIN_COUNT = 1;
 const MAX_COUNT = 5;
 
 async function fetchWorkspace(slug) {
-  const res = await fetch(`/api/workspaces/${slug}`);
+  const res = await fetch(`${BASE}/api/workspaces/${slug}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Failed to load settings (${res.status})`);
   return res.json();
@@ -13,7 +13,7 @@ async function fetchWorkspace(slug) {
 async function ensureWorkspace(slug) {
   let ws = await fetchWorkspace(slug);
   if (!ws) {
-    const res = await fetch(`/api/workspaces`, {
+    const res = await fetch(`${BASE}/api/workspaces`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slug, name: slug, welcome_text: "Send a message to get started.", followup_enabled: false, followup_count: 3, default_questions: [] }),
@@ -25,7 +25,7 @@ async function ensureWorkspace(slug) {
 }
 
 async function saveWorkspace(slug, payload) {
-  const res = await fetch(`/api/workspaces/${slug}`, {
+  const res = await fetch(`${BASE}/api/workspaces/${slug}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -125,7 +125,7 @@ if (!WORKSPACE_SLUG) {
 // ========== Unsaved-changes guard ==========
 
 function navigateBack() {
-  window.location.href = `/${encodeURIComponent(WORKSPACE_SLUG)}`;
+  window.location.href = `${BASE}/${encodeURIComponent(WORKSPACE_SLUG)}`;
 }
 
 function showModal() {
@@ -376,7 +376,7 @@ saveBtn.addEventListener("click", async () => {
     savedMsg.textContent = "Saved";
     savedMsg.classList.add("visible");
     setTimeout(() => {
-      window.location.href = `/${encodeURIComponent(WORKSPACE_SLUG)}`;
+      window.location.href = `${BASE}/${encodeURIComponent(WORKSPACE_SLUG)}`;
     }, 700);
   } catch (err) {
     savedMsg.textContent = err.message;

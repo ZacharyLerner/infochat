@@ -36,7 +36,7 @@ Each server only needs its own folder:
 ```bash
 git clone --filter=blob:none --sparse https://github.com/ZacharyLerner/infochat.git
 cd infochat
-git sparse-checkout set llm-backend   # or universal-chat / uploader / scheduler
+git sparse-checkout set llm-backend   # or universal-chat / "uploader scheduler"
 cd llm-backend
 # create .env (see the folder's README)
 docker compose -f docker-compose.yml up -d --build
@@ -44,4 +44,8 @@ docker compose -f docker-compose.yml up -d --build
 
 `-f docker-compose.yml` skips `docker-compose.override.yml`, the development setup (source mount and
 auto-reload) that a plain `docker compose up` merges in. Updates: `git pull` from the repo root, then the
-same `up -d --build`. The scheduler can share a host with the uploader.
+same `up -d --build`. The uploader's compose file also runs the scheduler, so check out both folders there.
+
+Chat and the uploader serve HTTPS with a self-signed cert (built into the image) and are published
+at `https://infochat.its.uri.edu/chat/` and `/upload/`: the campus load balancer routes those paths to
+`10.140.2.31:3000` and `:3001`. `ROOT_PATH` in each compose file sets the prefix.

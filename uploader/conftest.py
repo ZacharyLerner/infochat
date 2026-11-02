@@ -3,7 +3,17 @@ import io
 
 import pytest
 
+import conversion
+import main
 import store
+
+
+@pytest.fixture(autouse=True)
+def no_real_queues(monkeypatch):
+    """.env points at production SQS: never send jobs there or consume (and delete) real results."""
+    monkeypatch.setattr(main, "DOCLING_RESULTS_QUEUE_URL", "")
+    monkeypatch.setattr(conversion, "DOCLING_QUEUE_URL", "")
+    monkeypatch.setattr(conversion, "DOCLING_RESULTS_QUEUE_URL", "")
 
 
 # ---------------------------------------------------------------------------

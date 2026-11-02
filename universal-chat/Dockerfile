@@ -12,4 +12,9 @@ COPY . .
 
 EXPOSE 3000
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3000"]
+# Self-signed cert: the campus load balancer needs HTTPS to this server but doesn't validate it.
+RUN mkdir /certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -subj "/CN=infochat.its.uri.edu" -keyout /certs/key.pem -out /certs/cert.pem
+
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3000", \
+     "--ssl-keyfile", "/certs/key.pem", "--ssl-certfile", "/certs/cert.pem"]

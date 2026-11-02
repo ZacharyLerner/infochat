@@ -8,28 +8,13 @@ Run **exactly one** scheduler for the whole deployment. A second one by mistake 
 the uploader claims each due job with an S3 conditional write, so a job never starts twice. It
 only doubles the requests.
 
-## Configure `.env`
-
-```
-UPLOADER_URL=http://<uploader-host>:3000
-APP_API_KEY=<the uploader's APP_API_KEY>
-```
-
-Docker Compose passes these to the container. `APP_API_KEY` can be left empty only if the
-uploader has none set.
-
 ## Run
 
-```bash
-git clone --filter=blob:none --sparse https://github.com/ZacharyLerner/infochat.git
-cd infochat && git sparse-checkout set scheduler && cd scheduler
-# create .env as above
-docker compose up -d --build
-docker compose logs -f scheduler      # prints only started jobs and failures
-```
-
-The container restarts on failure and after a reboot (`restart: unless-stopped`). After
-`git pull`, run `docker compose up -d --build` again.
+The uploader's [`docker-compose.yml`](../uploader/docker-compose.yml) builds and starts it next to
+the uploader: it reuses the uploader's `.env` for `APP_API_KEY`, calls `https://uploader:3000` and
+trusts the uploader's self-signed cert through `SSL_CERT_FILE` (shared `certs` volume). Logs:
+`docker compose logs -f scheduler` from `uploader/`, which print only started jobs and failures.
+The development override doesn't start it, so local stacks never run the shared scrape jobs.
 
 One tick by hand, without Docker: `UPLOADER_URL=... APP_API_KEY=... python3 scheduler.py`.
-With Docker: `docker compose run --rm scheduler python scheduler.py`.
+With Docker, from `uploader/`: `docker compose -f docker-compose.yml run --rm scheduler python scheduler.py`.

@@ -235,7 +235,7 @@ function _confirmDeleteSession(sessionId) {
     renderSessionList();
   }
   // Best-effort: notify the backend to free the in-process engine
-  fetch(`/api/chat/${WORKSPACE_SLUG}/${sessionId}/session`, { method: "DELETE" }).catch(() => {});
+  fetch(`${BASE}/api/chat/${WORKSPACE_SLUG}/${sessionId}/session`, { method: "DELETE" }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ async function startNewChat() {
   _log.time("startNewChat");
 
   try {
-    const res = await fetch(`/api/chat/${WORKSPACE_SLUG}/session`, { method: "POST" });
+    const res = await fetch(`${BASE}/api/chat/${WORKSPACE_SLUG}/session`, { method: "POST" });
     if (!res.ok) throw new Error(`Server returned ${res.status}`);
     const { session_id } = await res.json();
     _log.timeEnd("startNewChat");
@@ -355,7 +355,7 @@ function getSettings() {
 async function loadWorkspaceSettings(slug) {
   _log.debug(`loadWorkspaceSettings: fetching settings for '${slug}'`);
   try {
-    const res = await fetch(`/api/workspaces/${slug}`);
+    const res = await fetch(`${BASE}/api/workspaces/${slug}`);
     if (res.ok) {
       _workspaceSettings = await res.json();
       _log.info(`loadWorkspaceSettings: loaded — followup_enabled=${_workspaceSettings.followup_enabled} followup_count=${_workspaceSettings.followup_count} default_question_categories=${(_workspaceSettings.default_questions || []).length}`);
@@ -749,7 +749,7 @@ async function sendMessage(overrideText) {
     _log.debug(`sendMessage: POST /api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`,
       { message_len: text.length, history_turns: history.length, has_file: !!fileCtx });
 
-    const res = await fetch(`/api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`, {
+    const res = await fetch(`${BASE}/api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestBody),
@@ -1043,7 +1043,7 @@ async function uploadFile(file) {
   _log.time(`uploadFile: ${file.name}`);
 
   try {
-    const res = await fetch(`/api/upload/${WORKSPACE_SLUG}`, {
+    const res = await fetch(`${BASE}/api/upload/${WORKSPACE_SLUG}`, {
       method: "POST",
       body: formData,
     });
@@ -1279,7 +1279,7 @@ async function confirmSendEmail() {
   _log.info(`confirmSendEmail: sending to='${to}' subject='${subject}'`);
 
   try {
-    const res = await fetch("/api/send-email", {
+    const res = await fetch(`${BASE}/api/send-email`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to, subject, body, from_addr: from }),
