@@ -50,6 +50,7 @@ const addCategoryBtn   = document.getElementById("dq-add-category-btn");
 const wsNameInput      = document.getElementById("workspace-name-input");
 const slugDisplay      = document.getElementById("settings-slug-display");
 const welcomeTextInput = document.getElementById("welcome-text-input");
+const cannedDelayInput = document.getElementById("canned-delay-input");
 const backBtn          = document.getElementById("back-btn");
 const modal            = document.getElementById("unsaved-modal");
 const modalStayBtn     = document.getElementById("modal-stay-btn");
@@ -70,8 +71,13 @@ function _snapshot() {
     followup_enabled: enabledCheckbox.checked,
     followup_count: currentCount,
     email_enabled: emailCheckbox.checked,
+    canned_delay_seconds: cannedDelaySeconds(),
     default_questions: currentCategories,
   });
+}
+
+function cannedDelaySeconds() {
+  return Math.min(30, Math.max(0, Number(cannedDelayInput.value) || 0));
 }
 
 function isDirty() {
@@ -103,6 +109,7 @@ function applyToUI(ws) {
   decrementBtn.disabled = !ws.followup_enabled || currentCount <= MIN_COUNT;
   incrementBtn.disabled = !ws.followup_enabled || currentCount >= MAX_COUNT;
   emailCheckbox.checked = ws.email_enabled || false;
+  cannedDelayInput.value = ws.canned_delay_seconds ?? 1;
   currentCategories = JSON.parse(JSON.stringify(ws.default_questions || []));
   renderAllCategories();
   markClean();
@@ -302,9 +309,13 @@ function buildCategoryBlock(cat, catIdx) {
   return block;
 }
 
+// A question is a plain string (asks the LLM) or { question, answer } (canned answer)
 function buildQuestionRow(question, catIdx, qIdx) {
+  const canned = typeof question === "string" ? null : question;
+  const wrap = document.createElement("div");
   const row = document.createElement("div");
   row.className = "dq-question-row";
+  wrap.appendChild(row);
 
   const dragHandle = document.createElement("span");
   dragHandle.className = "dq-drag-handle";
@@ -314,10 +325,22 @@ function buildQuestionRow(question, catIdx, qIdx) {
   const qEditInput = document.createElement("input");
   qEditInput.type = "text";
   qEditInput.className = "dq-text-input dq-question-edit-input";
-  qEditInput.value = question;
+  qEditInput.value = canned ? canned.question : question;
   qEditInput.maxLength = 120;
   qEditInput.addEventListener("input", (e) => {
-    currentCategories[catIdx].questions[qIdx] = e.target.value;
+    if (canned) canned.question = e.target.value;
+    else currentCategories[catIdx].questions[qIdx] = e.target.value;
+  });
+
+  const addAnswerBtn = document.createElement("button");
+  addAnswerBtn.className = "dq-add-question-btn";
+  addAnswerBtn.title = "Reply with a fixed answer instead of asking the AI";
+  addAnswerBtn.innerHTML = `${PLUS_ICON} Add answer`;
+  addAnswerBtn.addEventListener("click", () => {
+    const obj = { question: qEditInput.value, answer: "" };
+    currentCategories[catIdx].questions[qIdx] = obj;
+    answerDrafts.set(obj, "");
+    renderAllCategories();
   });
 
   const removeBtn = document.createElement("button");
@@ -331,9 +354,145 @@ function buildQuestionRow(question, catIdx, qIdx) {
 
   row.appendChild(dragHandle);
   row.appendChild(qEditInput);
+  if (!canned) row.appendChild(addAnswerBtn);
   row.appendChild(removeBtn);
-  return row;
+
+  if (canned) wrap.appendChild(answerDrafts.has(canned) ? buildAnswerEditor(canned, catIdx, qIdx) : buildAnswerCard(canned, catIdx, qIdx));
+  return wrap;
 }
+
+// Open answer editors, keyed by the question object; the draft only reaches the data on Save
+const answerDrafts = new WeakMap();
+const PLUS_ICON = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+
+function revertToQuestion(canned, catIdx, qIdx) {
+  currentCategories[catIdx].questions[qIdx] = canned.question;
+  answerDrafts.delete(canned);
+  renderAllCategories();
+}
+
+function buildAnswerEditor(canned, catIdx, qIdx) {
+  const panel = document.createElement("div");
+  panel.className = "dq-answer-panel";
+
+  const answerInput = document.createElement("textarea");
+  answerInput.className = "dq-answer-input";
+  answerInput.placeholder = "Answer shown when this question is clicked (Markdown supported)";
+  answerInput.maxLength = 4000;
+  answerInput.rows = 4;
+  answerInput.value = answerDrafts.get(canned);
+
+  const actions = document.createElement("div");
+  actions.className = "dq-answer-actions";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "dq-answer-btn";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => {
+    if (!canned.answer) return revertToQuestion(canned, catIdx, qIdx);
+    answerDrafts.delete(canned);
+    renderAllCategories();
+  });
+
+  const saveAnswerBtn = document.createElement("button");
+  saveAnswerBtn.className = "dq-answer-btn dq-answer-btn-primary";
+  saveAnswerBtn.textContent = "Save answer";
+  const syncSave = () => { saveAnswerBtn.disabled = answerInput.value.trim() === ""; };
+  syncSave();
+  const doSave = () => {
+    if (saveAnswerBtn.disabled) return;
+    canned.answer = answerInput.value.trim();
+    answerDrafts.delete(canned);
+    renderAllCategories();
+  };
+  answerInput.addEventListener("input", () => { answerDrafts.set(canned, answerInput.value); syncSave(); });
+  answerInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doSave(); }
+  });
+  saveAnswerBtn.addEventListener("click", doSave);
+
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveAnswerBtn);
+  panel.appendChild(answerInput);
+  panel.appendChild(actions);
+  requestAnimationFrame(() => answerInput.focus());
+  return panel;
+}
+
+function buildAnswerCard(canned, catIdx, qIdx) {
+  const card = document.createElement("div");
+  card.className = "dq-answer-card";
+
+  const label = document.createElement("span");
+  label.className = "dq-answer-label";
+  label.textContent = "Fixed answer";
+
+  // Rendered the way the chat page shows it
+  const text = document.createElement("div");
+  text.className = "dq-answer-text";
+  text.innerHTML = marked.parse(canned.answer);
+
+  const editBtn = document.createElement("button");
+  editBtn.className = "dq-answer-icon-btn";
+  editBtn.title = "Edit answer";
+  editBtn.setAttribute("aria-label", "Edit answer");
+  editBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
+  editBtn.addEventListener("click", () => {
+    answerDrafts.set(canned, canned.answer);
+    renderAllCategories();
+  });
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.className = "dq-delete-btn";
+  deleteBtn.title = "Delete answer";
+  deleteBtn.setAttribute("aria-label", "Delete answer");
+  deleteBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+  deleteBtn.addEventListener("click", () => {
+    confirmDeleteAnswer(canned.question, () => revertToQuestion(canned, catIdx, qIdx));
+  });
+
+  const head = document.createElement("div");
+  head.className = "dq-answer-card-head";
+  head.appendChild(label);
+  head.appendChild(editBtn);
+  head.appendChild(deleteBtn);
+
+  card.appendChild(head);
+  card.appendChild(text);
+  return card;
+}
+
+// ---- Delete-answer confirmation ----
+const deleteAnswerModal = document.getElementById("delete-answer-modal");
+const deleteAnswerName  = document.getElementById("delete-answer-question");
+let _onConfirmDeleteAnswer = null;
+
+function confirmDeleteAnswer(question, onConfirm) {
+  _onConfirmDeleteAnswer = onConfirm;
+  deleteAnswerName.textContent = question;
+  deleteAnswerModal.setAttribute("aria-hidden", "false");
+  deleteAnswerModal.classList.add("modal-visible");
+  document.getElementById("delete-answer-cancel-btn").focus();
+}
+
+function hideDeleteAnswerModal() {
+  _onConfirmDeleteAnswer = null;
+  deleteAnswerModal.setAttribute("aria-hidden", "true");
+  deleteAnswerModal.classList.remove("modal-visible");
+}
+
+document.getElementById("delete-answer-cancel-btn").addEventListener("click", hideDeleteAnswerModal);
+document.getElementById("delete-answer-confirm-btn").addEventListener("click", () => {
+  const onConfirm = _onConfirmDeleteAnswer;
+  hideDeleteAnswerModal();
+  onConfirm?.();
+});
+deleteAnswerModal.addEventListener("click", (e) => {
+  if (e.target === deleteAnswerModal) hideDeleteAnswerModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && deleteAnswerModal.classList.contains("modal-visible")) hideDeleteAnswerModal();
+});
 
 // ---- Add category ----
 const doAddCategory = () => {
@@ -357,7 +516,15 @@ saveBtn.addEventListener("click", async () => {
     .filter(cat => cat.category.trim() !== "")
     .map(cat => ({
       category: cat.category.trim(),
-      questions: cat.questions.filter(q => q.trim() !== "").map(q => q.trim()),
+      questions: cat.questions
+        .map(q => {
+          if (typeof q === "string") return q.trim();
+          const question = q.question.trim();
+          const answer = q.answer.trim();
+          // An empty answer falls back to a normal LLM question
+          return answer ? { question, answer } : question;
+        })
+        .filter(q => (typeof q === "string" ? q : q.question) !== ""),
     }));
 
   const payload = {
@@ -366,6 +533,7 @@ saveBtn.addEventListener("click", async () => {
     followup_enabled: enabledCheckbox.checked,
     followup_count: currentCount,
     email_enabled: emailCheckbox.checked,
+    canned_delay_seconds: cannedDelaySeconds(),
     default_questions: cleanedCategories,
   };
 

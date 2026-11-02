@@ -562,8 +562,10 @@
       cat.questions.forEach(q => {
         const btn = document.createElement("button");
         btn.className = "uc-dq-chip";
-        btn.textContent = q;
-        btn.addEventListener("click", () => sendMessage(q));
+        // A plain string asks the LLM; an object carries a canned answer
+        const canned = typeof q === "string" ? null : q;
+        btn.textContent = canned ? canned.question : q;
+        btn.addEventListener("click", () => sendMessage(btn.textContent, canned));
         chipsRow.appendChild(btn);
       });
       group.appendChild(chipsRow);
@@ -801,7 +803,7 @@
     return s;
   }
 
-  async function sendMessage(overrideText) {
+  async function sendMessage(overrideText, canned = null) {
     const text = overrideText !== undefined ? overrideText : input.value.trim();
     if (!text || isBusy) return;
 
@@ -827,58 +829,63 @@
     let sources  = [];
 
     try {
-      const res = await fetch(`${serverOrigin}/api/chat/${encodeURIComponent(slug)}`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false, followup_suffix: followupSuffix }),
-      });
+      if (canned) {
+        await new Promise(r => setTimeout(r, (settings.canned_delay_seconds ?? 1) * 1000));
+        fullText = canned.answer;
+      } else {
+        const res = await fetch(`${serverOrigin}/api/chat/${encodeURIComponent(slug)}`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false, followup_suffix: followupSuffix }),
+        });
 
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
+        if (!res.ok) throw new Error(`Server error ${res.status}`);
 
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer    = "";
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer    = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        // Split on SSE event boundaries (\n\n) so embedded newlines in JSON don't fragment events
-        const events = buffer.split("\n\n");
-        buffer = events.pop(); // last item may be an incomplete event
+          buffer += decoder.decode(value, { stream: true });
+          // Split on SSE event boundaries (\n\n) so embedded newlines in JSON don't fragment events
+          const events = buffer.split("\n\n");
+          buffer = events.pop(); // last item may be an incomplete event
 
-        for (const event of events) {
-          const line = event.trim();
-          if (!line.startsWith("data:")) continue;
-          const raw = line.slice(5).trim();
-          if (!raw) continue;
-          try {
-            const chunk = JSON.parse(raw);
-            if (chunk.textResponse) {
-              if (!started) { started = true; bubble.innerHTML = ""; }
-              fullText += chunk.textResponse;
-              const { mainText } = parseFollowUp(fullText);
-              bubble.innerHTML = renderMarkdown(mainText);
-              msgArea.scrollTop = msgArea.scrollHeight;
-            }
-            if (chunk.sources && chunk.sources.length > 0) sources = chunk.sources;
-          } catch (_) {}
+          for (const event of events) {
+            const line = event.trim();
+            if (!line.startsWith("data:")) continue;
+            const raw = line.slice(5).trim();
+            if (!raw) continue;
+            try {
+              const chunk = JSON.parse(raw);
+              if (chunk.textResponse) {
+                if (!started) { started = true; bubble.innerHTML = ""; }
+                fullText += chunk.textResponse;
+                const { mainText } = parseFollowUp(fullText);
+                bubble.innerHTML = renderMarkdown(mainText);
+                msgArea.scrollTop = msgArea.scrollHeight;
+              }
+              if (chunk.sources && chunk.sources.length > 0) sources = chunk.sources;
+            } catch (_) {}
+          }
         }
-      }
 
-      // Flush any remaining complete event left in the buffer after stream ends
-      if (buffer.trim().startsWith("data:")) {
-        const raw = buffer.trim().slice(5).trim();
-        if (raw) {
-          try {
-            const chunk = JSON.parse(raw);
-            if (chunk.textResponse) {
-              if (!started) { started = true; bubble.innerHTML = ""; }
-              fullText += chunk.textResponse;
-            }
-            if (chunk.sources && chunk.sources.length > 0) sources = chunk.sources;
-          } catch (_) {}
+        // Flush any remaining complete event left in the buffer after stream ends
+        if (buffer.trim().startsWith("data:")) {
+          const raw = buffer.trim().slice(5).trim();
+          if (raw) {
+            try {
+              const chunk = JSON.parse(raw);
+              if (chunk.textResponse) {
+                if (!started) { started = true; bubble.innerHTML = ""; }
+                fullText += chunk.textResponse;
+              }
+              if (chunk.sources && chunk.sources.length > 0) sources = chunk.sources;
+            } catch (_) {}
+          }
         }
       }
 

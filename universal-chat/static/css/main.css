@@ -1227,6 +1227,173 @@ a.cite-ref:hover {
     border-color: #fecaca;
 }
 
+.dq-answer-panel,
+.dq-answer-card {
+    margin: 2px 30px 8px 22px; /* past the drag handle, short of the delete button */
+}
+
+.dq-answer-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.dq-answer-input {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    font-family: inherit;
+    color: var(--uri-blue);
+    background: var(--panel);
+    outline: none;
+    resize: vertical;
+    transition: border-color 0.15s;
+}
+
+.dq-answer-input:focus {
+    border-color: var(--uri-blue-light);
+}
+
+.dq-answer-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.dq-answer-btn {
+    height: 30px;
+    padding: 0 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--uri-blue);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.dq-answer-btn:hover {
+    background: var(--gray-light);
+    border-color: var(--uri-blue-light);
+}
+
+.dq-answer-btn-primary {
+    background: var(--uri-blue);
+    border-color: var(--uri-blue);
+    color: #fff;
+}
+
+.dq-answer-btn-primary:hover {
+    background: var(--uri-blue-mid);
+    border-color: var(--uri-blue-mid);
+}
+
+.dq-answer-btn-primary:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background: var(--uri-blue);
+}
+
+.dq-answer-card {
+    padding: 8px 8px 10px 12px;
+    background: var(--gray-light);
+    border-left: 3px solid var(--uri-gold);
+    border-radius: 0 4px 4px 0;
+}
+
+.dq-answer-card-head {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.dq-answer-label {
+    flex: 1;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gray-mid);
+}
+
+.dq-answer-icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px;
+    cursor: pointer;
+    color: var(--gray-mid);
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.dq-answer-icon-btn:hover {
+    color: var(--uri-blue-light);
+    background: var(--panel);
+    border-color: var(--border);
+}
+
+.dq-answer-text {
+    margin-top: 2px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--uri-blue);
+    overflow-wrap: anywhere;
+}
+
+/* Phones: "Add answer" moves under its question so the question stays readable */
+@media (max-width: 480px) {
+    .dq-question-row {
+        flex-wrap: wrap;
+    }
+
+    .dq-question-row .dq-question-edit-input {
+        flex-basis: calc(100% - 52px);
+    }
+
+    .dq-question-row .dq-add-question-btn {
+        order: 1;
+        height: 28px;
+        margin-left: 22px;
+    }
+}
+
+.dq-answer-text > * + * {
+    margin-top: 6px;
+}
+
+.dq-answer-text ul,
+.dq-answer-text ol {
+    padding-left: 20px;
+}
+
+.dq-answer-text a {
+    color: var(--uri-blue-light);
+}
+
+.dq-answer-delay {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--gray-mid);
+}
+
+.dq-global-delay {
+    margin-top: 12px;
+}
+
+.dq-answer-delay .dq-text-input {
+    flex: 0 0 72px;
+    height: 28px;
+}
+
 .dq-add-question-row {
     display: flex;
     align-items: center;

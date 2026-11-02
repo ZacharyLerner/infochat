@@ -408,8 +408,10 @@ function renderDefaultQuestionsBar() {
     cat.questions.forEach(q => {
       const btn = document.createElement("button");
       btn.className = "dq-bar-chip";
-      btn.textContent = q;
-      btn.addEventListener("click", () => sendMessage(q));
+      // A plain string asks the LLM; an object carries a canned answer
+      const canned = typeof q === "string" ? null : q;
+      btn.textContent = canned ? canned.question : q;
+      btn.addEventListener("click", () => sendMessage(btn.textContent, canned));
       chips.appendChild(btn);
     });
 
@@ -645,7 +647,7 @@ messageInput.addEventListener("keydown", (e) => {
   }
 });
 
-async function sendMessage(overrideText) {
+async function sendMessage(overrideText, canned = null) {
   const text = overrideText !== undefined ? overrideText : messageInput.value.trim();
   if (!text || isBusy) {
     if (isBusy) _log.warn("sendMessage: blocked — isBusy=true");
@@ -732,115 +734,122 @@ async function sendMessage(overrideText) {
   _log.time(`stream session=${activeSessionId}`);
 
   try {
-    const requestBody = {
-      message: text,
-      session_id: activeSessionId,
-      history: history,
-      followup_suffix: followupSuffix,
-    };
-    if (fileCtx) {
-      requestBody.file_context = {
-        filename: fileCtx.filename,
-        markdown: fileCtx.markdown,
-        summary: fileCtx.summary,
+    if (canned) {
+      const delay = settings.canned_delay_seconds ?? 1;
+      _log.info(`sendMessage: canned answer — waiting ${delay}s instead of calling the LLM`);
+      await new Promise(r => setTimeout(r, delay * 1000));
+      fullText = canned.answer;
+    } else {
+      const requestBody = {
+        message: text,
+        session_id: activeSessionId,
+        history: history,
+        followup_suffix: followupSuffix,
       };
-    }
+      if (fileCtx) {
+        requestBody.file_context = {
+          filename: fileCtx.filename,
+          markdown: fileCtx.markdown,
+          summary: fileCtx.summary,
+        };
+      }
 
-    _log.debug(`sendMessage: POST /api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`,
-      { message_len: text.length, history_turns: history.length, has_file: !!fileCtx });
+      _log.debug(`sendMessage: POST /api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`,
+        { message_len: text.length, history_turns: history.length, has_file: !!fileCtx });
 
-    const res = await fetch(`${BASE}/api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
+      const res = await fetch(`${BASE}/api/chat/${WORKSPACE_SLUG}/${activeSessionId}/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
 
-    if (!res.ok) {
-      _log.error(`sendMessage: stream endpoint returned HTTP ${res.status}`);
-      throw new Error(`Server error ${res.status}`);
-    }
-    _log.debug("sendMessage: SSE stream opened — reading tokens…");
+      if (!res.ok) {
+        _log.error(`sendMessage: stream endpoint returned HTTP ${res.status}`);
+        throw new Error(`Server error ${res.status}`);
+      }
+      _log.debug("sendMessage: SSE stream opened — reading tokens…");
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split("\n\n");
-      buffer = events.pop();
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop();
 
-      for (const event of events) {
-        const line = event.trim();
-        if (!line.startsWith("data:")) continue;
-        const raw = line.slice(5).trim();
-        if (!raw) continue;
+        for (const event of events) {
+          const line = event.trim();
+          if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim();
+          if (!raw) continue;
 
-        try {
-          const chunk = JSON.parse(raw);
+          try {
+            const chunk = JSON.parse(raw);
 
-          if (chunk.error) {
-            // RhodyRAG fired an event: error — surface it to the user
-            _log.error("sendMessage: RhodyRAG error event:", chunk.error);
-            throw new Error(chunk.error);
-          }
-
-          if (chunk.textResponse) {
-            if (!started) {
-              started = true;
-              _log.debug("sendMessage: first token received — clearing typing indicator");
-              bubble.innerHTML = "";
+            if (chunk.error) {
+              // RhodyRAG fired an event: error — surface it to the user
+              _log.error("sendMessage: RhodyRAG error event:", chunk.error);
+              throw new Error(chunk.error);
             }
-            tokenCount++;
-            fullText += chunk.textResponse;
 
-            if (emailActionDetected) {
-              // Already in email mode — just accumulate, don't touch the bubble
-            } else if (fullText.includes(EMAIL_ACTION_DELIMITER)) {
-              // EMAIL_ACTION: just appeared — wipe whatever was rendered and
-              // replace with the drafting indicator immediately
-              emailActionDetected = true;
-              _log.info("sendMessage: EMAIL_ACTION detected mid-stream — switching to drafting indicator");
-              bubble.innerHTML = `<span class="drafting-email-indicator"><span class="typing-indicator"><span></span><span></span><span></span></span><span class="drafting-email-label">Drafting email…</span></span>`;
-              chatWindow.scrollTop = chatWindow.scrollHeight;
-            } else {
-              // Normal render — only show text before any EMAIL_ACTION delimiter
-              const { mainText } = parseFollowUpQuestions(fullText);
-              bubble.innerHTML = parseMarkdown(mainText);
-              chatWindow.scrollTop = chatWindow.scrollHeight;
+            if (chunk.textResponse) {
+              if (!started) {
+                started = true;
+                _log.debug("sendMessage: first token received — clearing typing indicator");
+                bubble.innerHTML = "";
+              }
+              tokenCount++;
+              fullText += chunk.textResponse;
+
+              if (emailActionDetected) {
+                // Already in email mode — just accumulate, don't touch the bubble
+              } else if (fullText.includes(EMAIL_ACTION_DELIMITER)) {
+                // EMAIL_ACTION: just appeared — wipe whatever was rendered and
+                // replace with the drafting indicator immediately
+                emailActionDetected = true;
+                _log.info("sendMessage: EMAIL_ACTION detected mid-stream — switching to drafting indicator");
+                bubble.innerHTML = `<span class="drafting-email-indicator"><span class="typing-indicator"><span></span><span></span><span></span></span><span class="drafting-email-label">Drafting email…</span></span>`;
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+              } else {
+                // Normal render — only show text before any EMAIL_ACTION delimiter
+                const { mainText } = parseFollowUpQuestions(fullText);
+                bubble.innerHTML = parseMarkdown(mainText);
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+              }
             }
-          }
 
-          if (chunk.sources && chunk.sources.length > 0) {
-            sources = chunk.sources;
-            _log.debug(`sendMessage: received ${sources.length} source(s)`, sources.map(s => s.title));
+            if (chunk.sources && chunk.sources.length > 0) {
+              sources = chunk.sources;
+              _log.debug(`sendMessage: received ${sources.length} source(s)`, sources.map(s => s.title));
+            }
+          } catch (parseErr) {
+            // Re-throw errors we deliberately raised above (RhodyRAG error events)
+            if (parseErr.message && !parseErr.message.startsWith("Unexpected")) throw parseErr;
+            _log.warn("sendMessage: failed to parse SSE chunk:", raw.slice(0, 100), parseErr);
           }
-        } catch (parseErr) {
-          // Re-throw errors we deliberately raised above (RhodyRAG error events)
-          if (parseErr.message && !parseErr.message.startsWith("Unexpected")) throw parseErr;
-          _log.warn("sendMessage: failed to parse SSE chunk:", raw.slice(0, 100), parseErr);
         }
       }
-    }
 
-    // Flush remainder
-    if (buffer.trim().startsWith("data:")) {
-      const raw = buffer.trim().slice(5).trim();
-      if (raw) {
-        try {
-          const chunk = JSON.parse(raw);
-          if (chunk.textResponse) {
-            if (!started) { started = true; bubble.innerHTML = ""; }
-            fullText += chunk.textResponse;
+      // Flush remainder
+      if (buffer.trim().startsWith("data:")) {
+        const raw = buffer.trim().slice(5).trim();
+        if (raw) {
+          try {
+            const chunk = JSON.parse(raw);
+            if (chunk.textResponse) {
+              if (!started) { started = true; bubble.innerHTML = ""; }
+              fullText += chunk.textResponse;
+            }
+            if (chunk.sources && chunk.sources.length > 0) {
+              sources = chunk.sources;
+            }
+          } catch (parseErr) {
+            _log.warn("sendMessage: failed to parse final SSE chunk:", raw.slice(0, 100), parseErr);
           }
-          if (chunk.sources && chunk.sources.length > 0) {
-            sources = chunk.sources;
-          }
-        } catch (parseErr) {
-          _log.warn("sendMessage: failed to parse final SSE chunk:", raw.slice(0, 100), parseErr);
         }
       }
     }

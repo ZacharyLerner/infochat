@@ -27,6 +27,7 @@ class TestWorkspaceApi:
             "followup_enabled": False,
             "followup_count": 3,
             "email_enabled": False,
+            "canned_delay_seconds": 1.0,
             "default_questions": [],
         }
 
@@ -58,6 +59,21 @@ class TestWorkspaceApi:
         assert data["name"] == "Updated"
         assert data["followup_count"] == 2
         assert data["default_questions"] == [{"category": "FAQ", "questions": ["Q1?"]}]
+
+    def test_canned_answers_round_trip_and_validate(self, client):
+        _create_ws(client, slug="canned", name="Canned")
+        questions = ["Ask the LLM?", {"question": "Hours?", "answer": "9-5, Mon-Fri."}]
+        resp = client.put("/api/workspaces/canned", json={
+            "name": "Canned",
+            "canned_delay_seconds": 1.5,
+            "default_questions": [{"category": "FAQ", "questions": questions}],
+        })
+        assert resp.status_code == 200
+        data = client.get("/api/workspaces/canned").json()
+        assert data["default_questions"][0]["questions"] == questions
+        assert data["canned_delay_seconds"] == 1.5
+        resp = client.put("/api/workspaces/canned", json={"name": "Canned", "canned_delay_seconds": 99})
+        assert resp.status_code == 422
 
     def test_update_missing_returns_404(self, client):
         resp = client.put("/api/workspaces/ghost", json={"name": "Ghost", "followup_count": 3})
