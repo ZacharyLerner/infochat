@@ -32,13 +32,20 @@ class FakeBody:
     def iter_chunks(self, size):
         yield self.data
 
+    def read(self):
+        return self.data
+
 
 class FakeS3:
     def __init__(self):
         self.objects = {}
 
-    def get_object(self, Bucket, Key):
-        return {"Body": FakeBody(self.objects[(Bucket, Key)]), "Metadata": {}}
+    def get_object(self, Bucket, Key, Range=None):
+        data = self.objects[(Bucket, Key)]
+        if Range:  # "bytes=0-4"
+            start, end = map(int, Range.removeprefix("bytes=").split("-"))
+            data = data[start:end + 1]
+        return {"Body": FakeBody(data), "Metadata": {}}
 
     def put_object(self, Bucket, Key, Body, **kwargs):
         self.objects[(Bucket, Key)] = Body
@@ -268,3 +275,97 @@ def test_inline_truncates_to_max_chars(aws):
 def test_inline_error_is_returned_not_raised(aws):
     out = handler.lambda_handler({"bucket": BUCKET, "key": "workspaces/s/chat/uploads/U/missing.pdf"}, None)
     assert out["status"] == "error" and out["error"]
+
+
+# ---------------------------------------------------------------------------
+# Slim image: PDFs and images are forwarded to the full converter (FORWARD_FUNCTION)
+# ---------------------------------------------------------------------------
+
+class FakeLambda:
+    def __init__(self, reply=None, function_error=False):
+        self.calls = []
+        self.reply, self.function_error = reply, function_error
+
+    def invoke(self, FunctionName, Payload):
+        self.calls.append((FunctionName, json.loads(Payload)))
+        out = {"Payload": FakeBody(json.dumps(self.reply).encode())}
+        if self.function_error:
+            out["FunctionError"] = "Unhandled"
+        return out
+
+
+@pytest.fixture
+def slim(aws, monkeypatch):
+    """The slim image's setup: a full converter to forward to."""
+    fake = FakeLambda(reply={"batchItemFailures": [], "results": [{"status": "success"}]})
+    monkeypatch.setattr(handler, "FORWARD_FUNCTION", "full-converter")
+    monkeypatch.setattr(handler, "lambda_client", fake)
+    return fake
+
+
+@pytest.mark.parametrize("name", ["report.pdf", "SCAN.JPG"])
+def test_slim_forwards_pdf_and_image_records_unchanged(aws, slim, name):
+    s3, sqs = aws
+    s3.objects[(BUCKET, ORIG + name)] = b"%PDF-1.7"
+    record = {"messageId": "m1", "body": json.dumps({"bucket": BUCKET, "key": ORIG + name}),
+              "attributes": {"ApproximateReceiveCount": "2"}}
+    out = handler.lambda_handler({"Records": [record]}, None)
+    assert slim.calls == [("full-converter", {"Records": [record]})]
+    assert out == {"batchItemFailures": [], "results": [{"status": "success"}]}
+    assert (BUCKET, OUT_KEY) not in s3.objects and sqs.sent == []  # the full converter reports
+
+
+def test_slim_passes_on_the_full_converters_failures(aws, slim):
+    slim.reply = {"batchItemFailures": [{"itemIdentifier": "m1"}], "results": []}
+    out = run({"bucket": BUCKET, "key": ORIG + "report.pdf"})
+    assert out["batchItemFailures"] == [{"itemIdentifier": "m1"}]
+
+
+@pytest.mark.parametrize("receive_count, published", [(1, False), (3, True)])
+def test_slim_forward_crash_is_a_failure_reported_on_final_attempt(aws, slim, receive_count, published):
+    _, sqs = aws
+    slim.function_error = True
+    out = run({"bucket": BUCKET, "key": ORIG + "report.pdf", "context": CONTEXT}, receive_count)
+    assert out["batchItemFailures"] == [{"itemIdentifier": "m1"}]
+    assert [m["context"] for m in sqs.sent] == ([CONTEXT] if published else [])
+
+
+@pytest.mark.parametrize("content, content_type, forwarded", [
+    (b"%PDF-1.7 handbook", None, True),
+    (b"<html>", "application/pdf", True),
+    (PAGE, "text/html", False),
+], ids=["pdf-magic", "pdf-content-type", "html"])
+def test_slim_recognises_scraped_pdfs_by_content(aws, slim, content, content_type, forwarded):
+    s3, _ = aws
+    key = ORIG + "https_example_edu_page"
+    s3.objects[(BUCKET, key)] = content
+    out = run({"bucket": BUCKET, "key": key, "output_key": OUT_KEY, "scraped": True,
+               "source_url": "https://example.edu/page", "content_type": content_type})
+    assert bool(slim.calls) == forwarded
+    if not forwarded:
+        assert out["batchItemFailures"] == [] and "Undergraduate Admissions" in doc_text(written_doc(s3))
+
+
+def test_slim_converts_office_and_html_itself(aws, slim):
+    _, doc = convert(aws, PAGE, "report.html")
+    assert slim.calls == [] and "Undergraduate Admissions" in doc_text(doc)
+
+
+def test_slim_forwards_inline_pdf_and_returns_the_reply(aws, slim):
+    slim.reply = {"status": "success", "markdown": "# Scanned"}
+    event = {"bucket": BUCKET, "key": "workspaces/s/chat/uploads/U/scan.pdf"}
+    assert handler.lambda_handler(event, None) == {"status": "success", "markdown": "# Scanned"}
+    assert slim.calls == [("full-converter", event)]
+
+
+def test_slim_inline_forward_crash_is_returned_not_raised(aws, slim):
+    slim.function_error = True
+    out = handler.lambda_handler({"bucket": BUCKET, "key": "workspaces/s/chat/uploads/U/scan.pdf"}, None)
+    assert out["status"] == "error" and "full-converter failed" in out["error"]
+
+
+def test_slim_inline_markdown_is_converted_locally(aws, slim):
+    s3, _ = aws
+    s3.objects[(BUCKET, CHAT_KEY)] = b"# Parking\n\nVisitors park in lot 21."
+    out = handler.lambda_handler({"bucket": BUCKET, "key": CHAT_KEY}, None)
+    assert slim.calls == [] and "lot 21" in out["markdown"]

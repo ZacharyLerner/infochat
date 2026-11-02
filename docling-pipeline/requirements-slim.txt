@@ -1,0 +1,7 @@
+# Slim converter (Dockerfile.slim): docling without torch or models, for DOCX, PPTX, XLSX,
+# HTML and Markdown; PDFs and images are forwarded to the full image (FORWARD_FUNCTION).
+# Keep the versions equal to requirements.txt, so both images write identical documents.
+docling-slim[convert-core,format-office,format-html,format-markdown]==2.133.0
+docling-core==2.104.0
+boto3==1.42.97
+beautifulsoup4==4.15.0

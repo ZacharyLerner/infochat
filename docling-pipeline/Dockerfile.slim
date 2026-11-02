@@ -1,0 +1,14 @@
+# Slim docling converter for AWS Lambda: same handler as Dockerfile, but no torch and no
+# model weights, so cold starts are short. Converts DOCX, PPTX, XLSX, HTML and Markdown;
+# set FORWARD_FUNCTION to the full converter, which gets PDFs and images.
+FROM public.ecr.aws/lambda/python:3.12
+
+COPY requirements-slim.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-slim.txt
+
+ENV HOME=/tmp \
+    PYTHONUNBUFFERED=1
+
+COPY app/ ${LAMBDA_TASK_ROOT}/
+
+CMD ["handler.lambda_handler"]

@@ -230,6 +230,31 @@ docker compose run --rm --no-deps -v ./tests:/var/task/tests --entrypoint sh doc
 
 To redeploy later: `FUNCTION_NAME=<name> ./scripts/push_to_ecr.sh`.
 
+### Slim converter in front (fast cold starts)
+
+The full image is ~1.9 GB, and importing docling loads torch even for formats that never use a
+model, so its cold starts take ~10 s and often hit Lambda's 10 s init limit. `Dockerfile.slim`
+builds the same handler from `docling-slim` without torch or model weights (~340 MB installed,
+~1 s import). It converts DOCX, PPTX, XLSX, HTML and Markdown itself, with byte-identical output, and
+forwards PDFs and images, including scraped pages that turn out to be PDFs, to the full converter
+named by `FORWARD_FUNCTION`.
+
+The slim function takes over the jobs queue's trigger and is what universal-chat invokes; the full
+function keeps its configuration, minus the trigger. The full converter gets the SQS record or
+direct-invoke event unchanged and publishes its own results, so retries, the DLQ and error reporting
+are the same as before.
+
+1. Push: `DOCKERFILE=Dockerfile.slim REPO=docling-conversion-slim ./scripts/push_to_ecr.sh`
+2. Create the Lambda (arm64) from that image: memory **2048 MB**, timeout **900 s** (it waits for
+   the full converter on PDFs), ephemeral storage like the full one. Env: the full function's
+   `OUTPUT_BUCKET`, `RESULT_QUEUE_URL`, `MAX_RECEIVE_COUNT`, `OUTPUT_PREFIX`, plus
+   `FORWARD_FUNCTION=<full function name>`.
+3. IAM role: the full function's permissions plus `lambda:InvokeFunction` on the full function.
+4. Move the jobs queue's event source mapping from the full function to the slim one (batch size 1,
+   ReportBatchItemFailures), and point universal-chat's `DOCLING_FUNCTION_NAME` at the slim function.
+
+Keep `requirements-slim.txt` on the same versions as `requirements.txt`.
+
 ## Performance notes (measured locally, 8 vCPU arm64)
 
 - Init (imports): ~5.5 s, under Lambda's 10 s init limit.
@@ -244,7 +269,9 @@ Formats docling handles natively: PDF, DOCX, PPTX, XLSX, HTML, images (PNG/JPG/T
 
 ```
 Dockerfile               Lambda base image + CPU torch + docling + baked models
+Dockerfile.slim          same handler without torch/models; forwards PDFs and images to the full image
 requirements.txt         pinned docling / boto3
+requirements-slim.txt    pinned docling-slim (same versions)
 app/handler.py           Lambda handler
 tests/                   pytest suite (run inside the image, see Local testing)
 docker-compose.yml       LocalStack + Lambda RIE + SQS poller

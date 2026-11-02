@@ -41,6 +41,9 @@ Environment:
    OCR_MODE          "auto" (default): OCR only PDFs lacking a text layer, and images
                      "always" / "never": force OCR on / off
    PRELOAD_MODELS    "true" to load the PDF pipeline during Lambda init
+   FORWARD_FUNCTION  set on the slim image (Dockerfile.slim, no models): the full
+                     converter Lambda that PDFs and images are handed to, as the same
+                     SQS record or direct-invoke event, whose reply is returned as is
    AWS_ENDPOINT_URL  set for LocalStack (boto3 picks it up automatically)
 """
 
@@ -101,6 +104,13 @@ _boto_config = Config(s3={"addressing_style": "path"}) if os.environ.get("AWS_EN
 s3 = boto3.client("s3", config=_boto_config)
 sqs = boto3.client("sqs") if RESULT_QUEUE_URL else None
 
+FORWARD_FUNCTION = os.environ.get("FORWARD_FUNCTION")
+# Wait as long as the full converter may run (Lambda's 900 s cap); no retries, since the
+# SQS redrive already retries and a retried invoke would convert the same file twice.
+lambda_client = boto3.client(
+    "lambda", config=Config(read_timeout=905, connect_timeout=10, retries={"max_attempts": 0})
+) if FORWARD_FUNCTION else None
+
 
 OCR_MODE = os.environ.get("OCR_MODE", "auto").strip().lower()
 # auto mode: OCR a PDF if more than this share of pages have (almost) no text layer
@@ -135,13 +145,16 @@ def _get_converter(do_ocr: bool) -> DocumentConverter:
     return _converters[do_ocr]
 
 
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")
+
+
 def _needs_ocr(path: Path) -> bool:
     if OCR_MODE in ("always", "never"):
         return OCR_MODE == "always"
     suffix = path.suffix.lower()
     if suffix != ".pdf":
         # Images need OCR to produce any text; other formats ignore the flag.
-        return suffix in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")
+        return suffix in _IMAGE_SUFFIXES
     try:
         import pypdfium2 as pdfium
 
@@ -407,9 +420,36 @@ def _convert_inline(job: dict) -> dict:
     return result
 
 
+def _needs_models(job: dict) -> bool:
+    """PDFs and images need the layout/OCR models, which only the full image has."""
+    if PurePosixPath(job.get("key") or "").suffix.lower() in (".pdf", *_IMAGE_SUFFIXES):
+        return True
+    if not job.get("scraped"):
+        return False
+    # A scraped page has no extension: recognise a PDF the way _prepare_scraped does.
+    head = s3.get_object(Bucket=job["bucket"], Key=job["key"], Range="bytes=0-4")["Body"].read()
+    return _is_pdf(head, job.get("content_type") or "")
+
+
+def _forward(event: dict) -> dict:
+    """Run *event* on FORWARD_FUNCTION (the full converter) and return its reply."""
+    reply = lambda_client.invoke(FunctionName=FORWARD_FUNCTION, Payload=json.dumps(event).encode())
+    payload = json.loads(reply["Payload"].read() or b"null")
+    if reply.get("FunctionError"):
+        raise RuntimeError(f"{FORWARD_FUNCTION} failed: {payload}")
+    return payload
+
+
 def lambda_handler(event, context):
     if "Records" not in (event or {}):
-        return _convert_inline(event or {})
+        event = event or {}
+        if FORWARD_FUNCTION and _needs_models(event):
+            try:
+                return _forward(event)
+            except Exception as exc:
+                logger.exception("Forwarding s3://%s/%s failed", event.get("bucket"), event.get("key"))
+                return {"status": "error", "error": str(exc)}
+        return _convert_inline(event)
 
     results = []
     failures = []
@@ -419,7 +459,16 @@ def lambda_handler(event, context):
         job = None
         try:
             body = json.loads(record["body"])
-            for job in _jobs_from_body(body):
+            jobs = _jobs_from_body(body)
+            if FORWARD_FUNCTION and any(_needs_models(j) for j in jobs):
+                # The full converter handles the record as if SQS had delivered it: it
+                # publishes results and reports failures (retry counts come with the record).
+                job = jobs[0]
+                reply = _forward({"Records": [record]})
+                failures.extend(reply.get("batchItemFailures", []))
+                results.extend(reply.get("results", []))
+                continue
+            for job in jobs:
                 result = _convert(job)
                 result["message_id"] = message_id
                 results.append(result)

@@ -3,6 +3,8 @@
 #
 #   AWS_REGION=us-east-1 ./scripts/push_to_ecr.sh
 #   TAG=v4 FUNCTION_NAME=docling-md-converter ./scripts/push_to_ecr.sh   # also redeploys
+#   DOCKERFILE=Dockerfile.slim REPO=docling-conversion-slim FUNCTION_NAME=docling-md-converter-slim \
+#     ./scripts/push_to_ecr.sh                                           # the slim image
 #
 # PLATFORM must match the Lambda function's architecture
 # (linux/arm64 -> arm64, linux/amd64 -> x86_64).
@@ -12,6 +14,7 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 REPO=${REPO:-docling-conversion-image}   # the repo the live Lambda runs from
 TAG=${TAG:-$(date +%Y%m%d-%H%M%S)}
 PLATFORM=${PLATFORM:-linux/arm64}
+DOCKERFILE=${DOCKERFILE:-Dockerfile}
 
 cd "$(dirname "$0")/.."
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -27,7 +30,7 @@ aws ecr get-login-password --region "$AWS_REGION" \
 
 # --provenance=false: Lambda rejects multi-manifest images that buildx
 # produces by default when attestations are attached.
-docker buildx build --platform "$PLATFORM" --provenance=false -t "$IMAGE" --push .
+docker buildx build --platform "$PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$IMAGE" --push .
 echo "Pushed $IMAGE"
 
 if [[ -n "${FUNCTION_NAME:-}" ]]; then
