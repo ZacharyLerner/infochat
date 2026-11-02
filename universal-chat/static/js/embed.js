@@ -294,7 +294,10 @@
       font-size: 11px;
       cursor: pointer;
       font-family: inherit;
-      white-space: nowrap;
+      line-height: 1.4;
+      text-align: left;
+      max-width: 100%;
+      overflow-wrap: anywhere;
       transition: background 0.12s, color 0.12s;
     }
     .uc-dq-chip:hover {
@@ -326,7 +329,10 @@
       font-size: 11px;
       cursor: pointer;
       font-family: inherit;
-      white-space: nowrap;
+      line-height: 1.4;
+      text-align: left;
+      max-width: 100%;
+      overflow-wrap: anywhere;
       transition: background 0.12s, color 0.12s;
     }
     .uc-followup-chip:hover {
@@ -499,7 +505,8 @@
   const closeBtn = document.getElementById("uc-widget-close-btn");
 
   // ── State ─────────────────────────────────────────────────────────────────
-  const sessionId = _uuid();
+  let sessionId = _uuid();
+  let history     = [];   // {role, content} turns sent with each message, fixed answers included
   let isOpen      = false;
   let isBusy      = false;
   let dqDismissed = false;
@@ -542,7 +549,8 @@
   // ── Default questions bar ─────────────────────────────────────────────────
   function renderDqBar() {
     dqBar.innerHTML = "";
-    const cats = (settings.default_questions || []).filter(c => c.questions && c.questions.length > 0);
+    // Settings reload on every open; stay hidden once the conversation has started
+    const cats = dqDismissed ? [] : (settings.default_questions || []).filter(c => c.questions && c.questions.length > 0);
     if (cats.length === 0) {
       input.placeholder = "Type a message...";
       return;
@@ -833,10 +841,10 @@
         await new Promise(r => setTimeout(r, (settings.canned_delay_seconds ?? 1) * 1000));
         fullText = canned.answer;
       } else {
-        const res = await fetch(`${serverOrigin}/api/chat/${encodeURIComponent(slug)}`, {
+        const res = await fetch(`${serverOrigin}/api/chat/${encodeURIComponent(slug)}/${sessionId}/stream`, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ message: messageToSend, session_id: sessionId, reset: false, followup_suffix: followupSuffix }),
+          body:    JSON.stringify({ message: messageToSend, session_id: sessionId, history, followup_suffix: followupSuffix }),
         });
 
         if (!res.ok) throw new Error(`Server error ${res.status}`);
@@ -890,6 +898,7 @@
       }
 
       const { mainText, questions } = parseFollowUp(fullText);
+      history.push({ role: "user", content: text }, { role: "assistant", content: mainText });
       const citHtml = buildCitations(sources);
       bubble.innerHTML = renderMarkdown(mainText) + citHtml;
       linkifyCitations(bubble, sources);
@@ -930,20 +939,16 @@
   }
 
   // ── Reset ─────────────────────────────────────────────────────────────────
-  async function resetChat() {
-    try {
-      await fetch(`${serverOrigin}/api/chat/${encodeURIComponent(slug)}`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ message: "", session_id: sessionId, reset: true }),
-      });
-    } catch (_) {}
+  function resetChat() {
+    sessionId = _uuid();
+    history = [];
     msgArea.innerHTML = "";
     dqDismissed = false;
     renderDqBar();
   }
 
   resetBtn.addEventListener("click", resetChat);
+  sendBtn.addEventListener("click", () => sendMessage());
 
   // ── Keyboard ──────────────────────────────────────────────────────────────
   input.addEventListener("keydown", e => {

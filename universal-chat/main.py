@@ -213,8 +213,8 @@ async def create_chat_session(slug: str):
 async def stream_chat_session(slug: str, session_id: str, body: ChatSessionRequest):
     """Stream a response in a persistent chat session.
 
-    Sends the conversation history to RhodyRAG so the ChatEngine can be
-    re-seeded after a server restart (last 6 turns are used).
+    Sends the conversation history to RhodyRAG, which rebuilds the session's
+    memory from it (last 20 messages), fixed answers included.
     """
     ws = store.get_workspace(slug)
     if not ws:

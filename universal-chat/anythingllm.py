@@ -197,8 +197,8 @@ async def stream_chat_session(
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response using a persistent ChatEngine session on RhodyRAG.
 
-    Sends the last 6 turns of conversation history alongside the message so the
-    backend can re-seed the LlamaIndex ChatEngine after a server restart.
+    Sends the last 20 messages of conversation history alongside the message;
+    the backend rebuilds the session's memory from them.
 
     followup_suffix is appended to the LLM prompt only (not used for retrieval).
 
@@ -211,7 +211,7 @@ async def stream_chat_session(
     in the uploaded document.
     """
     url = f"{API_URL}/api/workspace/{slug}/chat/{session_id}/stream"
-    history_count = len((history or [])[-6:])
+    history_count = len((history or [])[-20:])
 
     # Build the effective query message ──────────────────────────────────────
     # If a file is attached we:
@@ -272,7 +272,7 @@ async def stream_chat_session(
 
     payload: dict = {
         "message": effective_message,
-        "history": (history or [])[-6:],
+        "history": (history or [])[-20:],
     }
     if retrieval_query is not None:
         payload["retrieval_query"] = retrieval_query

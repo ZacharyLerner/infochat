@@ -196,6 +196,29 @@ class TestChatSession:
         assert "earlier question" in first and "earlier answer" in first
         assert {"earlier question", "earlier answer", "follow-up", "reply one"} <= set(second)
 
+    def test_resent_history_replaces_memory_so_fixed_answers_count(self):
+        sid = "test-session-fixed-answer"
+        ws = _make_workspace()
+        captured = []
+        try:
+            _collect(lambda: query.stream_chat_session(sid, ws, "first"),
+                     [_node()], _streaming_llm(["reply one"], captured))
+            # The browser then shows a fixed answer the backend never saw, and sends it as history
+            history = [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply one"},
+                {"role": "user", "content": "Service Desk hours?"},
+                {"role": "assistant", "content": "Mon-Fri 8-5"},
+            ]
+            _collect(lambda: query.stream_chat_session(sid, ws, "and weekends?", history=history),
+                     [_node()], _streaming_llm(["reply two"], captured))
+        finally:
+            query._chat_sessions.pop(sid, None)
+
+        second = [m.content for m in captured[1]]
+        assert {"Service Desk hours?", "Mon-Fri 8-5"} <= set(second)
+        assert second.count("first") == 1   # rebuilt from history, not appended to it
+
     def _empty_retrieval(self, sid, **kw):
         captured = []
         try:

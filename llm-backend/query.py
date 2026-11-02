@@ -9,8 +9,8 @@ Chat sessions maintain a ChatMemoryBuffer per session_id (UUID) for rolling
 conversation context. Each message retrieves fresh context nodes then streams
 tokens directly via llm.astream_chat() — bypassing LlamaIndex's ChatEngine
 astream_chat() which buffers the full response before yielding. History is
-re-seeded from the browser's localStorage payload on the first message after
-a server restart (last 6 turns).
+rebuilt from the browser's payload whenever one is sent (last 20 messages,
+trimmed to the memory's token limit).
 
 Web search (SearXNG) and query rewriting run concurrently with vector
 retrieval when enabled. Results are merged into a single labeled context block.
@@ -111,16 +111,16 @@ def _build_session_state(workspace: dict, chat_history: list[dict] | None = None
     Returns a dict with keys: memory, workspace
 
     `chat_history` is a list of {"role": "user"|"assistant", "content": str}
-    dicts from the browser's localStorage. The last 6 entries are pre-loaded
-    into ChatMemoryBuffer so the LLM has context after a server restart.
+    dicts from the browser. The last 20 entries are pre-loaded into
+    ChatMemoryBuffer as the conversation so far; its token limit drops the oldest.
     """
     from llama_index.core.base.llms.types import ChatMessage, MessageRole as MR
 
     memory = ChatMemoryBuffer.from_defaults(token_limit=4096)
 
-    # Re-seed from browser history (last 6 turns max)
+    # Seed from browser history (last 20 messages max)
     if chat_history:
-        for msg in chat_history[-6:]:
+        for msg in chat_history[-20:]:
             role = MR.USER if msg.get("role") == "user" else MR.ASSISTANT
             content = msg.get("content", "")
             if content:
@@ -314,10 +314,12 @@ async def stream_chat_session(
 
     try:
         # ── 1. Get or build session state ────────────────────────────────────
-        if session_id not in _chat_sessions:
+        # The browser's history wins when sent: it includes turns the backend never
+        # saw, such as fixed answers to default questions
+        if history or session_id not in _chat_sessions:
             state = await asyncio.to_thread(_build_session_state, workspace, history or [])
             with _chat_sessions_lock:
-                if session_id not in _chat_sessions:
+                if history or session_id not in _chat_sessions:
                     _chat_sessions[session_id] = state
 
         with _chat_sessions_lock:

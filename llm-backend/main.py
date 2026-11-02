@@ -491,7 +491,7 @@ class ChatSessionStreamRequest(BaseModel):
     message: str
     history: Optional[List[ChatMessageRecord]] = Field(
         default_factory=list,
-        description="Recent conversation turns from the browser (last 6 used to re-seed context after server restart).",
+        description="Recent conversation turns from the browser. When sent, the last 20 replace the session's memory, so turns the backend never saw (fixed answers) count too.",
     )
     retrieval_query: Optional[str] = Field(
         default=None,
@@ -525,9 +525,9 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
     """Send a message in an existing chat session and stream the response.
 
     The `history` field contains the last N conversation turns from the
-    browser's localStorage. This is used to re-seed the LlamaIndex ChatEngine
-    if the session is not in the in-process registry (e.g. after a server
-    restart), ensuring follow-up questions always have context.
+    browser. When sent, it rebuilds the session's memory, so follow-up
+    questions have context even after a server restart or a fixed answer
+    the backend never saw.
     """
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
