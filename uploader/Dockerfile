@@ -13,6 +13,9 @@ COPY . .
 
 EXPOSE 3000
 
+# Unbuffered, so `docker compose logs` shows the [scheduler] and [conversion] prints as they happen
+ENV PYTHONUNBUFFERED=1
+
 # Self-signed cert: the campus load balancer needs HTTPS to this server but doesn't validate it.
 # The scheduler trusts this cert and reaches the uploader as https://uploader:3000 (docker-compose.yml).
 RUN mkdir /certs && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
