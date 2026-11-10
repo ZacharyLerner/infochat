@@ -20,7 +20,8 @@ cd infochat && git sparse-checkout set uploader && cd uploader
 Create a `.env` file in the project root:
 
 ```
-RAG_API_URL=http://<llm-backend-host>:3001
+RAG_API_URL=https://<llm-backend-host>:3001
+RAG_CA_FILE=/app/rag-ca.pem   # put the backend's cert here: docker exec llm-backend-backend-1 cat /certs/cert.pem
 RAG_API_KEY=<llm-backend ADMIN_API_KEY>
 APP_API_KEY=<key required on /reembed, /copy and /scrape/run-due>
 

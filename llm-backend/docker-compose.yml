@@ -4,7 +4,7 @@
 #   1. Copy .env.example to .env and fill in API keys.
 #   2. docker compose up -d
 #
-# The backend is available at  http://localhost:3001
+# The backend is available at  https://localhost:3001 (self-signed; plain HTTP with the dev override)
 # SearXNG UI is available at   http://localhost:8888  (for debugging; backend
 #   uses the internal Docker network name 'searxng' on port 8080)
 #
@@ -23,6 +23,10 @@ services:
       # Override SEARXNG_URL to use the internal Docker service name so the
       # backend reaches SearXNG over the compose network (not the host port).
       - SEARXNG_URL=http://searxng:8080
+      # Names the self-signed cert is valid for: the address chat and the uploader use (RAG_API_URL).
+      - CERT_SAN=IP:10.140.2.160,DNS:localhost,IP:127.0.0.1
+    volumes:
+      - certs:/certs
     # All state lives in AWS: vectors in S3 Vectors (S3_VECTOR_BUCKET), settings
     # and document records in S3 (S3_STATE_BUCKET). AWS credentials come from
     # .env (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION) or an
@@ -44,3 +48,6 @@ services:
     environment:
       - SEARXNG_SECRET_KEY=${SEARXNG_SECRET_KEY:-change-me-in-production}
     restart: unless-stopped
+
+volumes:
+  certs:

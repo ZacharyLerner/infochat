@@ -3,7 +3,7 @@ import logging
 import time
 import httpx
 from typing import AsyncGenerator, Optional
-from config import API_URL, HEADERS
+from config import API_URL, HEADERS, RAG_VERIFY
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ async def stream_chat(
 
     t0 = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=120.0, verify=RAG_VERIFY) as client:
             async with client.stream("POST", url, json=payload, headers=HEADERS) as response:
                 logger.debug("stream_chat: RhodyRAG responded HTTP %d", response.status_code)
                 response.raise_for_status()
@@ -290,7 +290,7 @@ async def stream_chat_session(
 
     t0 = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=120.0, verify=RAG_VERIFY) as client:
             async with client.stream("POST", url, json=payload, headers=HEADERS) as response:
                 logger.debug(
                     "stream_chat_session: RhodyRAG responded HTTP %d", response.status_code

@@ -27,4 +27,11 @@ COPY . .
 
 EXPOSE 3001
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3001"]
+RUN mkdir /certs
+
+# HTTPS with a self-signed cert made on first start and kept in the certs volume, so it survives
+# rebuilds and callers can trust a copy of it (RAG_CA_FILE in universal-chat and the uploader).
+CMD ["sh", "-c", "[ -f /certs/cert.pem ] || openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+       -subj /CN=llm-backend -addext subjectAltName=${CERT_SAN} -keyout /certs/key.pem -out /certs/cert.pem \
+     && exec python -m uvicorn main:app --host 0.0.0.0 --port 3001 \
+       --ssl-keyfile /certs/key.pem --ssl-certfile /certs/cert.pem"]

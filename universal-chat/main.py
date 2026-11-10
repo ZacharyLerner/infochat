@@ -186,7 +186,7 @@ async def create_chat_session(slug: str):
     and sends back on every subsequent stream request.
     """
     import httpx as _httpx
-    from config import API_URL, HEADERS
+    from config import API_URL, HEADERS, RAG_VERIFY
 
     ws = store.get_workspace(slug)
     if not ws:
@@ -195,7 +195,7 @@ async def create_chat_session(slug: str):
 
     logger.debug("create_chat_session: slug=%s → POST %s/workspace/%s/chat/session", slug, API_URL, slug)
     try:
-        async with _httpx.AsyncClient(timeout=10.0) as client:
+        async with _httpx.AsyncClient(timeout=10.0, verify=RAG_VERIFY) as client:
             resp = await client.post(
                 f"{API_URL}/api/workspace/{slug}/chat/session",
                 headers=HEADERS,

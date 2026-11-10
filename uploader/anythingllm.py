@@ -2,7 +2,7 @@ import time
 import requests
 import logging
 from urllib.parse import quote
-from config import HEADERS, API_URL
+from config import HEADERS, API_URL, RAG_VERIFY
 
 
 # ---------------------------------------------------------------------------
@@ -11,7 +11,7 @@ from config import HEADERS, API_URL
 
 def LLM_workspace_exists(workspace: str) -> bool:
     """Return True if the workspace slug exists on the RAG backend."""
-    response = requests.get(f"{API_URL}/api/workspace/{workspace}", headers=HEADERS)
+    response = requests.get(f"{API_URL}/api/workspace/{workspace}", headers=HEADERS, verify=RAG_VERIFY)
     if response.status_code == 200:
         return True
     if response.status_code == 404:
@@ -35,6 +35,7 @@ def LLM_upload_document(uploaded_file, file_name: str, workspace: str) -> str:
     response = requests.post(
         f"{API_URL}/api/workspace/{workspace}/embed",
         headers=HEADERS,
+        verify=RAG_VERIFY,
         files={"file": (file_name, uploaded_file)},
     )
     response.raise_for_status()
@@ -52,7 +53,7 @@ def LLM_remove_document(workspace: str, doc_id: str) -> bool:
     url = f"{API_URL}/api/workspace/{workspace}/embed/{quote(doc_id, safe='')}"
     for attempt in range(3):
         try:
-            resp = requests.delete(url, headers=HEADERS, timeout=30)
+            resp = requests.delete(url, headers=HEADERS, timeout=30, verify=RAG_VERIFY)
             if resp.ok or resp.status_code == 404:
                 # 2xx = deleted successfully; 404 = already gone — either way the
                 # document is not in AnythingLLM, so we can safely remove the DB record.
@@ -82,7 +83,7 @@ def LLM_json_workspace_settings(workspace: str):
     Returns a dict with keys: prompt, similarity_threshold, top_n, temperature.
     Returns None on failure.
     """
-    response = requests.get(f"{API_URL}/api/workspace/{workspace}", headers=HEADERS)
+    response = requests.get(f"{API_URL}/api/workspace/{workspace}", headers=HEADERS, verify=RAG_VERIFY)
     if response.status_code != 200:
         logging.error(
             f"Failed to fetch settings for workspace '{workspace}': "
@@ -117,6 +118,7 @@ def LLM_update_workspace_settings(workspace: str, settings: dict) -> bool:
     response = requests.put(
         f"{API_URL}/api/workspace/{workspace}",
         headers=HEADERS,
+        verify=RAG_VERIFY,
         json=payload,
     )
     if response.status_code != 200:
@@ -137,4 +139,5 @@ def LLM_delete_workspace(workspace_id: str):
     return requests.delete(
         f"{API_URL}/api/workspace/{workspace_id}",
         headers=HEADERS,
+        verify=RAG_VERIFY,
     )

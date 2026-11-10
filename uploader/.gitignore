@@ -6,3 +6,5 @@ venv
 .vscode
 .ruff_cache
 __pycache__
+# Copy of llm-backend's /certs/cert.pem (RAG_CA_FILE=/app/rag-ca.pem in .env)
+rag-ca.pem

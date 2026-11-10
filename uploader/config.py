@@ -19,6 +19,8 @@ load_dotenv()
 API_URL: str = os.getenv("RAG_API_URL", "").rstrip("/")
 API_KEY: str = os.getenv("RAG_API_KEY", "")
 HEADERS: dict = {"X-API-Key": API_KEY} if API_KEY else {}
+# CA for the backend's self-signed HTTPS cert (a copy of its /certs/cert.pem); unset = system CAs.
+RAG_VERIFY = os.getenv("RAG_CA_FILE") or True
 
 APP_API_KEY: str = os.getenv("APP_API_KEY", "")
 
