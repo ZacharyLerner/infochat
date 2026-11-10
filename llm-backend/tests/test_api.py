@@ -51,6 +51,18 @@ class TestAuth:
         traversal = test_client.get("/%2e%2e/main.py")
         assert traversal.text == index_html
 
+    def test_served_under_root_path_and_at_root(self, test_client, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "ROOT_PATH", "/admin")
+        page = test_client.get("/admin/workspace/some-slug/query")
+        assert page.status_code == 200 and '<base href="/admin/" />' in page.text
+        bare = test_client.get("/admin", follow_redirects=False)
+        assert bare.status_code == 200 and '<base href="/admin/" />' in bare.text
+        assert test_client.get("/admin/app.js").text == Path("public/app.js").read_text()
+        # Chat and the uploader call the API without the prefix; the load balancer sends it with
+        for path in ("/api/auth/verify", "/admin/api/auth/verify"):
+            assert test_client.get(path, headers=AUTH_HEADERS).status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # Workspace lifecycle

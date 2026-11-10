@@ -23,6 +23,9 @@ services:
       # Override SEARXNG_URL to use the internal Docker service name so the
       # backend reaches SearXNG over the compose network (not the host port).
       - SEARXNG_URL=http://searxng:8080
+      # Admin UI at https://infochat.its.uri.edu/admin/ (path routing on the campus load balancer);
+      # unprefixed paths still work, so chat and the uploader keep calling /api/....
+      - ROOT_PATH=/admin
       # Names the self-signed cert is valid for: the address chat and the uploader use (RAG_API_URL).
       - CERT_SAN=IP:10.140.2.160,DNS:localhost,IP:127.0.0.1
     volumes:

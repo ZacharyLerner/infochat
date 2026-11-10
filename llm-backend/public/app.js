@@ -3,8 +3,15 @@
    All requests go to the same origin (FastAPI on :3001).
    ===================================================== */
 
-// Use same origin so this works regardless of host/port
-const API_BASE = '/api';
+// Same origin, under the path prefix the server set in <base href> (e.g. /admin); '' at the root.
+const BASE = new URL(document.baseURI).pathname.replace(/\/$/, '');
+const API_BASE = BASE + '/api';
+
+// The current URL path without BASE, as the router's /workspaces, /workspace/... scheme sees it.
+function appPath() {
+  const p = window.location.pathname;
+  return (p.startsWith(BASE) ? p.slice(BASE.length) : p) || '/';
+}
 
 // =====================================================
 // STATE
@@ -125,7 +132,7 @@ function clearApiKey() {
 
 async function validateKey(key) {
   try {
-    const res = await fetch('/api/settings', {
+    const res = await fetch(API_BASE + '/settings', {
       headers: { 'Accept': 'application/json', 'X-API-Key': key },
     });
     if (res.status === 403) return false;
@@ -195,9 +202,9 @@ const PANEL_TO_TAB = Object.fromEntries(Object.entries(TAB_PANELS).map(([k, v]) 
  */
 function navigateTo(path, { replace = false } = {}) {
   if (replace) {
-    history.replaceState(null, '', path);
+    history.replaceState(null, '', BASE + path);
   } else {
-    history.pushState(null, '', path);
+    history.pushState(null, '', BASE + path);
   }
   router();
 }
@@ -217,7 +224,7 @@ function navigateTo(path, { replace = false } = {}) {
  *   /workspace/{slug}/log      → workspace detail, log tab
  */
 async function router() {
-  const path = window.location.pathname;
+  const path = appPath();
 
   // Root → workspaces
   if (path === '/' || path === '') {
@@ -356,7 +363,7 @@ tabBtns.forEach(btn => {
     // Push the tab into the URL — popstate/router will handle DOM activation.
     // Use replace if we're already on a workspace URL to avoid stacking tab
     // entries in history (navigating between tabs shouldn't fill up history).
-    const currentIsWorkspace = /^\/workspace\//.test(window.location.pathname);
+    const currentIsWorkspace = /^\/workspace\//.test(appPath());
     navigateTo(`/workspace/${encodeURIComponent(currentWorkspaceSlug)}/${tab}`,
                { replace: currentIsWorkspace });
   });

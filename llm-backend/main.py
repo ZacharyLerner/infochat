@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Security, Depends
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -89,6 +89,31 @@ app = FastAPI(
     openapi_url="/openapi.json" if config.ENABLE_API_DOCS else None,
 )
 
+
+
+class RootPathMiddleware:
+    """Serve the app under ROOT_PATH (e.g. /admin behind the load balancer) as well as at /.
+
+    Requests without the prefix get it added, so routing works whether or not the load
+    balancer strips it, and callers like chat and the uploader can keep using /api/....
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if config.ROOT_PATH and scope["type"] in ("http", "websocket"):
+            path = scope["path"]
+            if path == config.ROOT_PATH:
+                # Serve the SPA directly: a slash redirect would say http:// behind the TLS load balancer
+                path += "/"
+            elif not path.startswith(config.ROOT_PATH + "/"):
+                path = config.ROOT_PATH + path
+            scope = {**scope, "root_path": config.ROOT_PATH, "path": path}
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(RootPathMiddleware)
 
 
 # All real API routes are registered on this router, which enforces the
@@ -662,6 +687,13 @@ app.include_router(api_router, prefix="/api")
 _PUBLIC_DIR = Path("public")
 
 
+def _index_html() -> HTMLResponse:
+    """index.html with <base href> set to ROOT_PATH, so its assets, API calls and URLs stay under it."""
+    html = (_PUBLIC_DIR / "index.html").read_text()
+    return HTMLResponse(html.replace('<base href="/" />', f'<base href="{config.ROOT_PATH}/" />'),
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa_catchall(full_path: str):
     """Serve static files from public/ or fall back to index.html (SPA).
@@ -675,7 +707,7 @@ async def spa_catchall(full_path: str):
         resolved = candidate.resolve()
         resolved.relative_to(_PUBLIC_DIR.resolve())
     except ValueError:
-        return FileResponse(str(_PUBLIC_DIR / "index.html"))
+        return _index_html()
 
     if resolved.is_file():
         # Prevent browsers from caching JS/CSS so deploys take effect immediately.
@@ -683,8 +715,7 @@ async def spa_catchall(full_path: str):
             if full_path.endswith((".js", ".css")) else {}
         return FileResponse(str(resolved), headers=no_cache_headers)
     # SPA fallback
-    return FileResponse(str(_PUBLIC_DIR / "index.html"),
-                        headers={"Cache-Control": "no-store"})
+    return _index_html()
 
 
 # --- Run ---------------------------------------------------------------------

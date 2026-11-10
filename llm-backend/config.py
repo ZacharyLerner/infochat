@@ -34,6 +34,9 @@ APP_API_KEY = os.getenv("ADMIN_API_KEY", "")
 # by FastAPI on internal routes that bypass this app's own auth dependency
 # system, so they are unauthenticated by design. Disabled by default —
 # enable only for local development by setting ENABLE_API_DOCS=1 in .env.
+# Path prefix the app is served under (e.g. /admin behind the campus load balancer); "" = root.
+ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
+
 ENABLE_API_DOCS = os.getenv("ENABLE_API_DOCS", "false").strip().lower() in ("1", "true", "yes")
 
 # Server host/port
