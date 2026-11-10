@@ -183,13 +183,25 @@ input:disabled { background: var(--gray-light); color: var(--gray-text); }
 .source-item { padding: 12px 20px; border-bottom: 1px solid var(--rule); }
 .source-item:last-child { border-bottom: none; }
 .source-meta { display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 600; }
-.source-meta > span:last-child:not(:first-child) { margin-left: auto; font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--gray-mid); }
+.source-meta > span:last-child:not(:first-child) { margin-left: auto; font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--gray-mid); white-space: nowrap; }
 .source-number { color: var(--uri-gold-dark); font-weight: 700; }
 .web-source-title { color: var(--uri-blue-light); text-decoration: none; }
 .web-source-title:hover { text-decoration: underline; }
 .source-url { font-family: var(--mono); font-size: 11px; color: var(--gray-mid); margin-top: 2px; word-break: break-all; }
 .source-text { font-size: 13px; color: var(--gray-text); margin-top: 4px; line-height: 1.55; overflow-wrap: anywhere; }
-.source-uncited { opacity: 0.5; }
+/* Cited vs only retrieved: app.js lists cited sources first, and each group gets one label */
+.source-cited:first-child::before, :not(.source-cited) + .source-cited::before,
+.source-uncited:first-child::before, :not(.source-uncited) + .source-uncited::before {
+  display: block; margin-bottom: 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
+}
+.source-cited:first-child::before, :not(.source-cited) + .source-cited::before { content: "Cited in answer"; color: var(--uri-gold-dark); }
+.source-uncited:first-child::before, :not(.source-uncited) + .source-uncited::before { content: "Not cited"; color: var(--gray-mid); }
+.source-item.source-uncited > * { opacity: 0.55; }
+.source-uncited .source-number { color: var(--gray-mid); }
+.log-source-chip.source-uncited { color: var(--gray-mid); }
+.log-web-link.source-uncited { color: #8fb3d1; }
+.log-source-chips > *:not(:first-child)::before, .log-web-links > *:not(:first-child)::before { margin-top: 6px; }
 
 /* ---------- Log: one panel, a row per entry ---------- */
 .log-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }

@@ -943,6 +943,11 @@ function safeHttpUrl(url) {
   return /^https?:\/\//i.test(url || '') ? url : '';
 }
 
+// ' source-cited' / ' source-uncited' from a source's cited flag; '' for old entries without one.
+function citedClass(s) {
+  return s.cited === true ? ' source-cited' : s.cited === false ? ' source-uncited' : '';
+}
+
 function renderSources(sources) {
   querySources.innerHTML = '';
 
@@ -967,7 +972,7 @@ function renderSources(sources) {
     const ordered = [...docs].sort((a, b) => (b.cited === true) - (a.cited === true));
     ordered.forEach(s => {
       const div = document.createElement('div');
-      div.className = 'source-item' + (s.cited === false ? ' source-uncited' : '');
+      div.className = 'source-item' + citedClass(s);
       const label = escHtml(sourceLabel(s));
       const url = safeHttpUrl(s.uri);
       div.innerHTML = `
@@ -996,7 +1001,7 @@ function renderSources(sources) {
     const orderedWeb = [...web].sort((a, b) => (b.cited === true) - (a.cited === true));
     orderedWeb.forEach(r => {
       const div = document.createElement('div');
-      div.className = 'source-item web-source-item' + (r.cited === false ? ' source-uncited' : '');
+      div.className = 'source-item web-source-item' + citedClass(r);
       const url = safeHttpUrl(r.url);
       const title = escHtml(r.title || r.url || 'Web result');
       div.innerHTML = `
@@ -1134,8 +1139,10 @@ function appendLogTurn(body, turn) {
   const docs = (turn.sources && turn.sources.documents) || [];
   if (docs.length) {
     const docsDiv = document.createElement('div');
-    const chips = docs.map(d =>
-      `<span class="log-source-chip${d.cited === false ? ' source-uncited' : ''}">${d.n ? `[${d.n}] ` : ''}${escHtml(sourceLabel(d))}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
+    // Cited first, as in the Query tab, so each group gets one label
+    const byCited = (a, b) => (b.cited === true) - (a.cited === true);
+    const chips = [...docs].sort(byCited).map(d =>
+      `<span class="log-source-chip${citedClass(d)}">${d.n ? `[${d.n}] ` : ''}${escHtml(sourceLabel(d))}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
     ).join('');
     docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
       <div class="log-source-chips">${chips}</div>`;
@@ -1146,8 +1153,8 @@ function appendLogTurn(body, turn) {
   const web = (turn.sources && turn.sources.web) || [];
   if (web.length) {
     const webDiv = document.createElement('div');
-    const links = web.map(r =>
-      `<a class="log-web-link${r.cited === false ? ' source-uncited' : ''}" href="${escHtml(safeHttpUrl(r.url))}" target="_blank" rel="noopener noreferrer">${r.n ? `[${r.n}] ` : ''}${escHtml(r.title || r.url || 'Web result')}</a>`
+    const links = [...web].sort((a, b) => (b.cited === true) - (a.cited === true)).map(r =>
+      `<a class="log-web-link${citedClass(r)}" href="${escHtml(safeHttpUrl(r.url))}" target="_blank" rel="noopener noreferrer">${r.n ? `[${r.n}] ` : ''}${escHtml(r.title || r.url || 'Web result')}</a>`
     ).join('');
     webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
       <div class="log-web-links">${links}</div>`;
