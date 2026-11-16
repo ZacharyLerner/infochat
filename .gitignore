@@ -3,3 +3,4 @@
 .mcp.json
 .ui-test-runs/
 __pycache__/
+.opencode/
