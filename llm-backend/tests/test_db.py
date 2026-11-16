@@ -22,7 +22,7 @@ class TestSettings:
         db.update_settings(temperature=0.3, nonexistent_field="value")
         s = db.get_settings()
         assert s["temperature"] == pytest.approx(0.3)
-        assert s["top_n"] == 5          # untouched default
+        assert s["top_n"] == 8          # untouched default
         assert "nonexistent_field" not in s
 
 
