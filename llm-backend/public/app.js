@@ -385,6 +385,10 @@ async function loadWorkspaces() {
   renderWorkspaceTable(workspaces);
 }
 
+// Dates as the uploader shows them: "Oct 26, 2026", and with the time where it matters
+const formatDay = (iso) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+const formatDateTime = (iso) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+
 function renderWorkspaceTable(workspaces) {
   workspaceTableBody.innerHTML = '';
 
@@ -398,22 +402,25 @@ function renderWorkspaceTable(workspaces) {
   workspaceTable.classList.remove('hidden');
 
   workspaces.forEach(ws => {
+    // The whole row opens the workspace (as a website row does in the uploader); the name is
+    // the keyboard control. Chat and Upload open the other apps; Delete shows on hover.
     const tr = document.createElement('tr');
+    tr.className = 'ws-row';
     tr.innerHTML = `
-      <td><strong>${escHtml(ws.name)}</strong></td>
-      <td><code>${escHtml(ws.slug)}</code></td>
-      <td>${escHtml(ws.llm_model || '—')}</td>
+      <td><button class="ws-open" data-slug="${escHtml(ws.slug)}" data-name="${escHtml(ws.name)}">${escHtml(ws.name)}</button></td>
+      <td><code title="${escHtml(ws.slug)}">${escHtml(ws.slug)}</code></td>
+      <td title="${escHtml(ws.llm_model || '')}">${escHtml(ws.llm_model || '—')}</td>
       <td>
-        <button class="action-link open-ws" data-slug="${escHtml(ws.slug)}" data-name="${escHtml(ws.name)}">Open</button>
-        <span class="action-sep"> · </span>
+        <a class="action-link" href="/chat/${encodeURIComponent(ws.slug)}" target="_blank" rel="noopener">Chat</a>
+        <a class="action-link" href="/upload/${encodeURIComponent(ws.slug)}" target="_blank" rel="noopener">Upload</a>
         <button class="action-link danger delete-ws" data-slug="${escHtml(ws.slug)}" data-name="${escHtml(ws.name)}">Delete</button>
       </td>
     `;
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('a, .delete-ws')) return;
+      openWorkspace(ws.slug, ws.name);
+    });
     workspaceTableBody.appendChild(tr);
-  });
-
-  document.querySelectorAll('.open-ws').forEach(btn => {
-    btn.addEventListener('click', () => openWorkspace(btn.dataset.slug, btn.dataset.name));
   });
 
   document.querySelectorAll('.delete-ws').forEach(btn => {
@@ -548,9 +555,9 @@ newWorkspaceBtn.addEventListener('click', async () => {
 
 // --- Create-workspace steps: 1 name & keys, 2 models & settings, 3 other ---
 const CREATE_STEP_TITLES = {
-  1: 'Workspace & Keys',
-  2: 'Models & Settings',
-  3: 'Other Settings',
+  1: 'Name and keys',
+  2: 'Models and retrieval',
+  3: 'Web search and rewriting',
 };
 const createBackBtn   = document.getElementById('create-back-btn');
 const createNextBtn   = document.getElementById('create-next-btn');
@@ -563,7 +570,7 @@ function showCreateStep(n) {
   createWorkspaceForm.querySelectorAll('.wizard-step').forEach(el => {
     el.classList.toggle('hidden', Number(el.dataset.step) !== n);
   });
-  createStepLabel.textContent = `Step ${n} of 3 \u2014 ${CREATE_STEP_TITLES[n]}`;
+  createStepLabel.textContent = `Step ${n} of 3 \u00b7 ${CREATE_STEP_TITLES[n]}`;
   createBackBtn.classList.toggle('hidden', n === 1);
   createNextBtn.classList.toggle('hidden', n === 3);
   createSubmitBtn.classList.toggle('hidden', n !== 3);
@@ -777,12 +784,12 @@ function renderDocTable(docs, slug) {
 
   docs.forEach(doc => {
     const tr = document.createElement('tr');
-    const date = doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString() : '—';
+    const date = doc.uploaded_at ? formatDay(doc.uploaded_at) : '—';
     tr.innerHTML = `
       <td>${escHtml(doc.filename)}</td>
       <td><code>${escHtml(doc.doc_id)}</code></td>
       <td>${doc.chunks_embedded ?? '—'}</td>
-      <td>${date}</td>
+      <td title="${escHtml(doc.uploaded_at ? formatDateTime(doc.uploaded_at) : '')}">${escHtml(date)}</td>
       <td>
         <button class="action-link danger delete-doc"
           data-slug="${escHtml(slug)}"
@@ -994,7 +1001,7 @@ function renderSources(sources) {
   if (web.length) {
     const header = document.createElement('p');
     header.className = 'sources-section-label web-label';
-    header.textContent = 'Web Results';
+    header.textContent = 'Web results';
     querySources.appendChild(header);
 
     // Same ordering as documents: cited results first, the rest muted
@@ -1073,7 +1080,7 @@ function renderQueryLog(entries, append = false) {
 
     // Format timestamp (latest activity)
     const lastTs = entry.updated_at || entry.timestamp;
-    const tsStr = lastTs ? new Date(lastTs).toLocaleString() : '—';
+    const tsStr = lastTs ? formatDateTime(lastTs) : '—';
     const durStr = entry.duration_ms != null ? `${(entry.duration_ms / 1000).toFixed(1)}s` : '';
     const turnsStr = entry.turns ? `${turns.length} turn${turns.length === 1 ? '' : 's'}` : '';
 
@@ -1089,9 +1096,8 @@ function renderQueryLog(entries, append = false) {
         ${rewroteNote}
       </div>
       <div class="log-entry-meta">
-        ${turnsStr ? `<span class="log-duration-badge">${escHtml(turnsStr)}</span>` : ''}
-        <span>${escHtml(tsStr)}</span>
-        ${durStr ? `<span class="log-duration-badge">${escHtml(durStr)}</span>` : ''}
+        <span class="log-entry-size">${escHtml(turnsStr || durStr)}</span>
+        <span class="log-entry-time">${escHtml(tsStr)}</span>
       </div>
     `;
 
@@ -1124,7 +1130,7 @@ function appendLogTurn(body, turn) {
   // Rewritten query (show whenever present)
   if (turn.rewritten_query) {
     const rw = document.createElement('div');
-    rw.innerHTML = `<div class="log-section-label">Rewritten Query</div>
+    rw.innerHTML = `<div class="log-section-label">Rewritten query</div>
       <div class="log-rewritten">${escHtml(turn.rewritten_query)}</div>`;
     body.appendChild(rw);
   }
@@ -1144,7 +1150,7 @@ function appendLogTurn(body, turn) {
     const chips = [...docs].sort(byCited).map(d =>
       `<span class="log-source-chip${citedClass(d)}">${d.n ? `[${d.n}] ` : ''}${escHtml(sourceLabel(d))}${typeof d.score === 'number' ? ' · ' + d.score.toFixed(3) : ''}</span>`
     ).join('');
-    docsDiv.innerHTML = `<div class="log-section-label">Document Sources</div>
+    docsDiv.innerHTML = `<div class="log-section-label">Document sources</div>
       <div class="log-source-chips">${chips}</div>`;
     body.appendChild(docsDiv);
   }
@@ -1156,7 +1162,7 @@ function appendLogTurn(body, turn) {
     const links = [...web].sort((a, b) => (b.cited === true) - (a.cited === true)).map(r =>
       `<a class="log-web-link${citedClass(r)}" href="${escHtml(safeHttpUrl(r.url))}" target="_blank" rel="noopener noreferrer">${r.n ? `[${r.n}] ` : ''}${escHtml(r.title || r.url || 'Web result')}</a>`
     ).join('');
-    webDiv.innerHTML = `<div class="log-section-label">Web Sources</div>
+    webDiv.innerHTML = `<div class="log-section-label">Web sources</div>
       <div class="log-web-links">${links}</div>`;
     body.appendChild(webDiv);
   }

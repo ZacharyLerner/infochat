@@ -54,3 +54,17 @@ FILE_SERVER_API_KEY = os.getenv("FILE_SERVER_API_KEY", "")
 # Chat-frontend server (workspace UI / chat)
 CHAT_SERVER_URL = os.getenv("CHAT_SERVER_URL", "http://10.140.2.30:3000")
 CHAT_SERVER_API_KEY = os.getenv("CHAT_SERVER_API_KEY", "")
+
+# --- Chatbot intake (unauthenticated, campus-network only; see intake.py) -----
+# Models and gateway key given to bots created through /api/intake. Blank falls
+# back to the global settings, so these only need setting when the global
+# settings are empty or should differ for requested bots.
+INTAKE_LLM_MODEL = os.getenv("INTAKE_LLM_MODEL", "")
+INTAKE_EMBED_MODEL = os.getenv("INTAKE_EMBED_MODEL", "")
+INTAKE_API_KEY = os.getenv("INTAKE_API_KEY", "")
+
+# Public base URLs people reach chat and the uploader at (through the load balancer).
+# Used only to build the links intake returns; FILE_SERVER_URL / CHAT_SERVER_URL above
+# are the addresses this server itself calls.
+PUBLIC_CHAT_URL = os.getenv("PUBLIC_CHAT_URL", "https://infochat.its.uri.edu/chat").rstrip("/")
+PUBLIC_UPLOAD_URL = os.getenv("PUBLIC_UPLOAD_URL", "https://infochat.its.uri.edu/upload").rstrip("/")

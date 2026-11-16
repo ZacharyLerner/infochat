@@ -177,6 +177,26 @@ def _do_delete(slug: str) -> None:
         logger.info("manager: workspace '%s' deleted on chat server", slug)
 
 
+def register_downstream(slug: str, name: str, chat_settings: dict) -> dict:
+    """Register a new workspace on the file and chat servers and wait for the answer.
+
+    Unlike on_workspace_created this is synchronous and reports the outcome, for
+    callers (intake) that must not hand out a workspace the other services don't know.
+    chat_settings are the chat page settings (welcome_text, default_questions, ...).
+    Returns {"uploader": bool, "chat": bool}.
+    """
+    uploader = _post(_FILE_BASE, "/api/v1/workspaces/db", _FILE_HEADERS,
+                     {"id": slug, "name": name}) is not None
+    chat = _post(_CHAT_BASE, "/api/workspaces", _CHAT_HEADERS,
+                 {"slug": slug, "name": name, **chat_settings}) is not None
+    return {"uploader": uploader, "chat": chat}
+
+
+def unregister_downstream(slug: str) -> None:
+    """Synchronously remove a workspace from the file and chat servers (rollback)."""
+    _do_delete(slug)
+
+
 def on_workspace_created(slug: str, name: str) -> None:
     """
     Called after a workspace is successfully created on this server.

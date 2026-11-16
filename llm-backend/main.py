@@ -35,6 +35,7 @@ import config
 import db
 import docling_chunks
 import embedding
+import intake
 import manager
 import query
 
@@ -676,7 +677,15 @@ def remove_workspace_docs(slug: str):
     return {"ok": True}
 
 
+@api_router.get("/owners", summary="Who requested each chatbot made through intake")
+async def list_chatbot_owners():
+    import asyncio
+    return await asyncio.to_thread(intake.list_owners)
+
+
 app.include_router(api_router, prefix="/api")
+# Intake is the one unauthenticated API (campus network only); see intake.py.
+app.include_router(intake.router, prefix="/api")
 
 
 # --- Static files (frontend) -------------------------------------------------

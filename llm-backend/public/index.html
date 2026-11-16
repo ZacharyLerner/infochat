@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <base href="/" />
   <title>Infochat Admin</title>
-  <link rel="stylesheet" href="styles.css?v=9" />
+  <link rel="stylesheet" href="styles.css?v=11" />
 </head>
 <body>
 
@@ -13,17 +13,17 @@
   <div id="login-screen" class="screen">
     <div class="login-box">
       <h1>Infochat</h1>
-      <p class="subtitle">Admin Interface</p>
+      <p class="subtitle">Admin</p>
       <form id="login-form">
-        <label for="api-key-input">API Key</label>
+        <label for="api-key-input">Admin API key</label>
         <input
           type="password"
           id="api-key-input"
-          placeholder="Enter your admin API key"
+          
           autocomplete="current-password"
           required
         />
-        <button type="submit">Access Admin Panel</button>
+        <button type="submit">Sign in</button>
         <p id="login-error" class="error-msg hidden"></p>
       </form>
     </div>
@@ -40,7 +40,7 @@
       </div>
       <nav>
         <button class="nav-btn active" data-view="workspaces">Workspaces</button>
-        <button class="nav-btn" data-view="settings">Global Settings</button>
+        <button class="nav-btn" data-view="settings">Global settings</button>
       </nav>
     </aside>
 
@@ -51,7 +51,7 @@
       <section id="view-workspaces" class="view active">
         <div class="view-header">
           <h2>Workspaces</h2>
-          <button id="new-workspace-btn" class="btn-primary">+ New Workspace</button>
+          <button id="new-workspace-btn" class="btn-primary">New workspace</button>
         </div>
 
         <div id="workspace-list-container">
@@ -61,8 +61,8 @@
               <tr>
                 <th>Name</th>
                 <th>Slug</th>
-                <th>LLM Model</th>
-                <th>Actions</th>
+                <th>LLM model</th>
+                <th><span class="hidden">Actions</span></th>
               </tr>
             </thead>
             <tbody id="workspace-table-body"></tbody>
@@ -72,8 +72,9 @@
 
       <!-- WORKSPACE DETAIL VIEW -->
       <section id="view-workspace-detail" class="view hidden">
+        <!-- Breadcrumb: the way back is the list's name, as in the header -->
+        <div class="breadcrumb"><button id="back-to-workspaces" class="crumb-link">Workspaces</button> <span aria-hidden="true">&rsaquo;</span></div>
         <div class="view-header">
-          <button id="back-to-workspaces" class="link-btn">&larr; Back</button>
           <h2 id="workspace-detail-name"></h2>
         </div>
 
@@ -88,11 +89,11 @@
         <div id="ws-settings" class="tab-panel active">
           <form id="workspace-settings-form" class="settings-form">
             <div class="form-row">
-              <label>LLM Model</label>
+              <label>LLM model</label>
               <select name="llm_model"><option value="">Not set</option></select>
             </div>
             <div class="form-row">
-              <label>API Key</label>
+              <label>API key</label>
               <input type="password" name="api_key" />
             </div>
             <div class="form-row">
@@ -100,55 +101,55 @@
               <input type="number" name="temperature" step="0.01" min="0" max="1" />
             </div>
             <div class="form-row">
-              <label>Top N Chunks</label>
+              <label>Top N chunks</label>
               <input type="number" name="top_n" min="1" />
             </div>
             <div class="form-row">
-              <label>Similarity Threshold</label>
+              <label>Similarity threshold</label>
               <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
             </div>
             <div class="form-row">
-              <label>Embed API Key</label>
+              <label>Embed API key</label>
               <input type="password" name="embed_api_key" />
             </div>
             <div class="form-row full-width">
-              <label>System Prompt</label>
+              <label>System prompt</label>
               <textarea name="system_prompt" rows="4"></textarea>
             </div>
             <div class="form-row readonly-section">
-              <label>Embed Model <span class="muted">(locked)</span></label>
+              <label>Embed model <span class="muted">Locked once the workspace is created</span></label>
               <input type="text" name="embed_model" disabled />
             </div>
 
-            <div class="form-section-divider">Web Search</div>
+            <div class="form-section-divider">Web search</div>
             <div class="form-row">
-              <label>Enable SearXNG Web Search</label>
+              <label>SearXNG web search</label>
               <label class="toggle-label">
                 <input type="checkbox" name="searxng_enabled" />
                 <span>Augment queries with live web results</span>
               </label>
             </div>
             <div class="form-row">
-              <label>Web Results per Query <span class="muted">(1–10)</span></label>
+              <label>Web results per query <span class="muted">1 to 10</span></label>
               <input type="number" name="searxng_num_results" min="1" max="10" />
             </div>
             <div class="form-row">
-              <label>Search Query Suffix <span class="muted">(web only)</span></label>
+              <label>Search query suffix <span class="muted">Added to web searches only</span></label>
               <input type="text" name="searxng_query_suffix" placeholder="e.g. site:uri.edu" />
             </div>
 
-            <div class="form-section-divider">Query Rewriting</div>
+            <div class="form-section-divider">Query rewriting</div>
             <div class="form-row">
-              <label>Rewrite Model <span class="muted">(choose Disabled to turn off)</span></label>
+              <label>Rewrite model <span class="muted">Choose Disabled to turn it off</span></label>
               <select name="rewrite_model"><option value="">Disabled</option></select>
             </div>
             <div class="form-row full-width">
-              <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
+              <label>Rewrite prompt <span class="muted">Leave empty to use the built-in prompt</span></label>
               <textarea name="rewrite_prompt" rows="6"></textarea>
             </div>
 
             <div class="form-actions">
-              <button type="submit" class="btn-primary">Save Changes</button>
+              <button type="submit" class="btn-primary">Save changes</button>
               <span id="ws-settings-msg" class="status-msg"></span>
             </div>
           </form>
@@ -157,27 +158,27 @@
         <!-- Tab: Documents -->
         <div id="ws-documents" class="tab-panel hidden">
           <div class="doc-upload-section">
-            <h3>Upload Document</h3>
+            <h3>Add a document</h3>
             <form id="embed-form">
               <div class="file-row">
                 <input type="file" id="embed-file-input" />
-                <button type="submit" class="btn-primary">Embed File</button>
+                <button type="submit" class="btn-primary">Upload</button>
               </div>
               <p id="embed-status" class="status-msg"></p>
             </form>
           </div>
 
           <div class="doc-list-section">
-            <h3>Embedded Documents</h3>
+            <h3>Documents</h3>
             <p id="doc-list-empty" class="muted hidden">No documents embedded yet.</p>
             <table id="doc-table" class="hidden">
               <thead>
                 <tr>
-                  <th>Filename</th>
+                  <th>Name</th>
                   <th>Doc ID</th>
                   <th>Chunks</th>
-                  <th>Uploaded</th>
-                  <th>Actions</th>
+                  <th>Added</th>
+                  <th><span class="hidden">Actions</span></th>
                 </tr>
               </thead>
               <tbody id="doc-table-body"></tbody>
@@ -191,18 +192,18 @@
             <form id="query-form">
               <textarea
                 id="query-input"
-                placeholder="Enter your question..."
+                placeholder="Ask a question"
                 rows="3"
               ></textarea>
               <div class="query-actions">
                 <button type="submit" id="query-submit-btn" class="btn-primary">Ask</button>
-                <button type="button" id="query-clear-btn" class="btn-secondary">Clear</button>
+                <button type="button" id="query-clear-btn" class="btn-text">Clear</button>
               </div>
             </form>
 
             <div id="query-result" class="hidden">
               <div id="query-rewrite-debug" class="hidden">
-                <h4>Rewritten Query <span class="debug-badge">debug</span></h4>
+                <h4>Rewritten query</h4>
                 <div id="query-rewritten-text" class="rewrite-debug-box"></div>
               </div>
 
@@ -223,7 +224,7 @@
               <button id="log-date-clear" class="link-btn hidden">Show all</button>
               <span id="log-count" class="muted"></span>
             </div>
-            <button id="clear-log-btn" class="btn-secondary">Clear Log</button>
+            <button id="clear-log-btn" class="btn-text btn-danger">Clear log</button>
           </div>
           <p id="log-empty" class="muted hidden">No queries logged yet.</p>
           <div id="log-entries"></div>
@@ -235,11 +236,11 @@
       <div id="create-workspace-modal" class="modal-backdrop hidden">
         <div class="modal">
           <div class="modal-header">
-            <h3>Create Workspace</h3>
-            <button id="close-modal-btn" class="link-btn">&times;</button>
+            <h3>New workspace</h3>
+            <button id="close-modal-btn" class="link-btn" aria-label="Close">&times;</button>
           </div>
           <form id="create-workspace-form" class="settings-form">
-            <div class="wizard-progress" id="create-step-label">Step 1 of 3 &mdash; Workspace &amp; Keys</div>
+            <div class="wizard-progress" id="create-step-label">Step 1 of 3 &middot; Name and keys</div>
 
             <!-- Step 1: name + keys -->
             <div class="wizard-step" data-step="1">
@@ -252,7 +253,7 @@
                 <input type="password" name="api_key" />
               </div>
               <div class="form-row">
-                <label>Embed API Key</label>
+                <label>Embed API key</label>
                 <input type="password" name="embed_api_key" />
               </div>
             </div>
@@ -260,11 +261,11 @@
             <!-- Step 2: models + retrieval settings -->
             <div class="wizard-step hidden" data-step="2">
               <div class="form-row">
-                <label>LLM Model</label>
+                <label>LLM model</label>
                 <select name="llm_model"><option value="">Use global default</option></select>
               </div>
               <div class="form-row">
-                <label>Embed Model <span class="muted">(locked after creation)</span></label>
+                <label>Embed model <span class="muted">Locked once the workspace is created</span></label>
                 <select name="embed_model"><option value="">Use global default</option></select>
               </div>
               <div class="form-row">
@@ -272,45 +273,45 @@
                 <input type="number" name="temperature" step="0.01" min="0" max="1" placeholder="e.g. 0.7" />
               </div>
               <div class="form-row">
-                <label>Top N Chunks</label>
+                <label>Top N chunks</label>
                 <input type="number" name="top_n" min="1" />
               </div>
               <div class="form-row">
-                <label>Similarity Threshold</label>
+                <label>Similarity threshold</label>
                 <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
               </div>
               <div class="form-row full-width">
-                <label>System Prompt</label>
+                <label>System prompt</label>
                 <textarea name="system_prompt" rows="4" placeholder="Leave blank to use global default"></textarea>
               </div>
             </div>
 
             <!-- Step 3: other settings -->
             <div class="wizard-step hidden" data-step="3">
-              <div class="form-section-divider">Web Search</div>
+              <div class="form-section-divider">Web search</div>
               <div class="form-row">
-                <label>Enable SearXNG Web Search</label>
+                <label>SearXNG web search</label>
                 <label class="toggle-label">
                   <input type="checkbox" name="searxng_enabled" />
                   <span>Augment queries with live web results</span>
                 </label>
               </div>
               <div class="form-row">
-                <label>Web Results per Query <span class="muted">(1–10)</span></label>
+                <label>Web results per query <span class="muted">1 to 10</span></label>
                 <input type="number" name="searxng_num_results" min="1" max="10" />
               </div>
               <div class="form-row">
-                <label>Search Query Suffix <span class="muted">(web only)</span></label>
+                <label>Search query suffix <span class="muted">Added to web searches only</span></label>
                 <input type="text" name="searxng_query_suffix" placeholder="e.g. site:uri.edu" />
               </div>
 
-              <div class="form-section-divider">Query Rewriting</div>
+              <div class="form-section-divider">Query rewriting</div>
               <div class="form-row">
-                <label>Rewrite Model <span class="muted">(choose Disabled to turn off)</span></label>
+                <label>Rewrite model <span class="muted">Choose Disabled to turn it off</span></label>
                 <select name="rewrite_model"><option value="">Disabled</option></select>
               </div>
               <div class="form-row full-width">
-                <label>Rewrite Prompt <span class="muted">(leave blank to use built-in default)</span></label>
+                <label>Rewrite prompt <span class="muted">Leave empty to use the built-in prompt</span></label>
                 <textarea name="rewrite_prompt" rows="4" placeholder="Leave blank to use the built-in default rewrite prompt..."></textarea>
               </div>
             </div>
@@ -318,7 +319,7 @@
             <div class="form-actions">
               <button type="button" id="create-back-btn" class="btn-secondary hidden">Back</button>
               <button type="button" id="create-next-btn" class="btn-primary">Next</button>
-              <button type="submit" id="create-submit-btn" class="btn-primary hidden">Create Workspace</button>
+              <button type="submit" id="create-submit-btn" class="btn-primary hidden">Create workspace</button>
               <span id="create-workspace-msg" class="status-msg"></span>
             </div>
           </form>
@@ -328,15 +329,15 @@
       <!-- GLOBAL SETTINGS VIEW -->
       <section id="view-settings" class="view hidden">
         <div class="view-header">
-          <h2>Global Settings</h2>
+          <h2>Global settings</h2>
         </div>
         <form id="global-settings-form" class="settings-form">
           <div class="form-row">
-            <label>LLM Model</label>
+            <label>LLM model</label>
             <select name="llm_model"><option value="">Not set</option></select>
           </div>
           <div class="form-row">
-            <label>API Key</label>
+            <label>API key</label>
             <input type="password" name="api_key" />
           </div>
           <div class="form-row">
@@ -344,55 +345,55 @@
             <input type="number" name="temperature" step="0.01" min="0" max="1" />
           </div>
           <div class="form-row">
-            <label>Top N Chunks</label>
+            <label>Top N chunks</label>
             <input type="number" name="top_n" min="1" />
           </div>
           <div class="form-row">
-            <label>Similarity Threshold</label>
+            <label>Similarity threshold</label>
             <input type="number" name="similarity_threshold" step="0.01" min="0" max="1" />
           </div>
           <div class="form-row">
-            <label>Embed Model</label>
+            <label>Embed model</label>
             <select name="embed_model"><option value="">Not set</option></select>
           </div>
           <div class="form-row">
-            <label>Embed API Key</label>
+            <label>Embed API key</label>
             <input type="password" name="embed_api_key" />
           </div>
           <div class="form-row full-width">
-            <label>System Prompt</label>
+            <label>System prompt</label>
             <textarea name="system_prompt" rows="4"></textarea>
           </div>
 
-          <div class="form-section-divider">Web Search</div>
+          <div class="form-section-divider">Web search</div>
           <div class="form-row">
-            <label>Enable SearXNG Web Search</label>
+            <label>SearXNG web search</label>
             <label class="toggle-label">
               <input type="checkbox" name="searxng_enabled" />
               <span>Augment queries with live web results</span>
             </label>
           </div>
           <div class="form-row">
-            <label>Web Results per Query <span class="muted">(1–10)</span></label>
+            <label>Web results per query <span class="muted">1 to 10</span></label>
             <input type="number" name="searxng_num_results" min="1" max="10" />
           </div>
           <div class="form-row">
-            <label>Search Query Suffix <span class="muted">(web only)</span></label>
+            <label>Search query suffix <span class="muted">Added to web searches only</span></label>
             <input type="text" name="searxng_query_suffix" placeholder="e.g. site:uri.edu" />
           </div>
 
-          <div class="form-section-divider">Query Rewriting</div>
+          <div class="form-section-divider">Query rewriting</div>
           <div class="form-row">
-            <label>Rewrite Model <span class="muted">(choose Disabled to turn off)</span></label>
+            <label>Rewrite model <span class="muted">Choose Disabled to turn it off</span></label>
             <select name="rewrite_model"><option value="">Disabled</option></select>
           </div>
           <div class="form-row full-width">
-            <label>Rewrite Prompt <span class="muted">(cleared = uses built-in default)</span></label>
+            <label>Rewrite prompt <span class="muted">Leave empty to use the built-in prompt</span></label>
             <textarea name="rewrite_prompt" rows="6"></textarea>
           </div>
 
           <div class="form-actions">
-            <button type="submit" class="btn-primary">Save Global Settings</button>
+            <button type="submit" class="btn-primary">Save global settings</button>
             <span id="global-settings-msg" class="status-msg"></span>
           </div>
         </form>
@@ -401,6 +402,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>

@@ -253,6 +253,22 @@ def delete_workspace(slug: str) -> bool:
     return existed
 
 
+# --- Owner records -----------------------------------------------------------
+# Bots requested through /api/intake record who asked for them, so someone can be
+# contacted about (or asked to renew) a bot. Stored apart from settings.json so
+# workspace updates never touch it; deleting the workspace deletes it.
+
+def set_owner(slug: str, owner: dict) -> None:
+    _put_json(_ws_key(slug, "owner.json"), owner, if_none_match=True)
+
+
+def get_owner(slug: str) -> Optional[dict]:
+    if not slug or "/" in slug:
+        return None
+    owner, _ = _get_json(_ws_key(slug, "owner.json"))
+    return owner
+
+
 # --- Document records --------------------------------------------------------
 
 def list_docs(slug: str) -> list:
