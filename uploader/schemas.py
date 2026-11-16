@@ -56,7 +56,7 @@ class ScrapeJobCreate(BaseModel):
     max_depth: int = 2
     max_pages: int = 100
     allow_offsite: bool = False
-    schedule_interval: Optional[str] = None  # hourly | daily | weekly | None
+    schedule_interval: Optional[str] = None  # daily | weekly | monthly | None (hourly: older jobs only)
 
 
 class ScrapeJobUpdate(BaseModel):

@@ -52,3 +52,6 @@ TEXT_EXTENSIONS: set[str] = {".txt", ".json", ".xml", ".md", ".csv"}
 
 # Path prefix the load balancer routes to this app (https://infochat.its.uri.edu/{prefix}/...).
 ROOT_PATH: str = os.getenv("ROOT_PATH", "").rstrip("/")
+
+# Where the chat app lives, for the "Open chat" link. Same host as this app behind the load balancer.
+CHAT_URL: str = os.getenv("CHAT_URL", "/chat").rstrip("/")

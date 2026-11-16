@@ -37,7 +37,6 @@ async function saveWorkspace(slug, payload) {
 // ========== Page Init ==========
 
 const enabledCheckbox  = document.getElementById("followup-enabled");
-const emailCheckbox    = document.getElementById("email-enabled");
 const countDisplay     = document.getElementById("count-display");
 const countRow         = document.getElementById("followup-count-row");
 const decrementBtn     = document.getElementById("count-decrement");
@@ -70,7 +69,6 @@ function _snapshot() {
     welcome_text: welcomeTextInput.value.trim(),
     followup_enabled: enabledCheckbox.checked,
     followup_count: currentCount,
-    email_enabled: emailCheckbox.checked,
     canned_delay_seconds: cannedDelaySeconds(),
     default_questions: currentCategories,
   });
@@ -87,7 +85,6 @@ function isDirty() {
     return wsNameInput.value.trim() !== "" ||
            welcomeTextInput.value.trim() !== "" ||
            enabledCheckbox.checked ||
-           emailCheckbox.checked ||
            currentCategories.length > 0;
   }
   return _snapshot() !== _savedSnapshot;
@@ -108,7 +105,6 @@ function applyToUI(ws) {
   countRow.classList.toggle("disabled", !ws.followup_enabled);
   decrementBtn.disabled = !ws.followup_enabled || currentCount <= MIN_COUNT;
   incrementBtn.disabled = !ws.followup_enabled || currentCount >= MAX_COUNT;
-  emailCheckbox.checked = ws.email_enabled || false;
   cannedDelayInput.value = ws.canned_delay_seconds ?? 1;
   currentCategories = JSON.parse(JSON.stringify(ws.default_questions || []));
   renderAllCategories();
@@ -532,7 +528,6 @@ saveBtn.addEventListener("click", async () => {
     welcome_text: welcomeTextInput.value.trim() || "Send a message to get started.",
     followup_enabled: enabledCheckbox.checked,
     followup_count: currentCount,
-    email_enabled: emailCheckbox.checked,
     canned_delay_seconds: cannedDelaySeconds(),
     default_questions: cleanedCategories,
   };

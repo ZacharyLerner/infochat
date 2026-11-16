@@ -26,7 +26,6 @@ class TestWorkspaceApi:
             "welcome_text": "Send a message to get started.",
             "followup_enabled": False,
             "followup_count": 3,
-            "email_enabled": False,
             "canned_delay_seconds": 1.0,
             "default_questions": [],
         }

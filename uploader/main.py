@@ -22,7 +22,7 @@ from anythingllm import (
     LLM_update_workspace_settings,
     LLM_delete_workspace,
 )
-from config import APP_API_KEY, TEXT_EXTENSIONS, MAX_UPLOAD_BYTES, ROOT_PATH
+from config import APP_API_KEY, TEXT_EXTENSIONS, MAX_UPLOAD_BYTES, ROOT_PATH, CHAT_URL
 from decling_conversion import docling_filename, fetch_page, DOCLING_SUFFIX
 from schemas import (
     FileResponse,
@@ -101,6 +101,7 @@ def _compute_next_run(interval: str | None, from_time=None):
         "hourly": timedelta(hours=1),
         "daily": timedelta(days=1),
         "weekly": timedelta(weeks=1),
+        "monthly": timedelta(days=30),  # shortcut: a 30-day month, not the calendar month; fine for refreshing pages
     }
     delta = deltas.get(interval)
     return (from_time + delta) if delta else None
@@ -234,8 +235,16 @@ def _parse_url_list(raw) -> tuple[list[str], list[str], int]:
     return valid, invalid, duplicates
 
 
-def _job_to_dict(job: dict, page_count: int = 0) -> dict:
-    return {**job, "is_running": store.is_running(job), "page_count": page_count}
+def _job_to_dict(job: dict, files=()) -> dict:
+    """The job plus its page count and how many of its pages are still converting or failed."""
+    statuses = [f.get("status") for f in files if f.get("scrape_job_id") == job["id"]]
+    return {
+        **job,
+        "is_running": store.is_running(job),
+        "page_count": len(statuses),
+        "converting_count": sum(s in ("converting", "embedding") for s in statuses),
+        "failed_count": statuses.count("failed"),
+    }
 
 
 def _require_url_list(raw) -> list[str]:
@@ -363,13 +372,9 @@ async def home(request: Request, workspace_id: str):
         }
     )
 
-    # Scrape jobs for this workspace, newest first, with page counts attached
-    page_counts = {}
-    for f in files:
-        if f.get("scrape_job_id"):
-            page_counts[f["scrape_job_id"]] = page_counts.get(f["scrape_job_id"], 0) + 1
+    # Scrape jobs for this workspace, newest first, with page counts attached; utils.js draws the cards
     scrape_jobs = [
-        _with_datetimes(_job_to_dict(job, page_counts.get(job["id"], 0)), "last_scraped_at", "next_scrape_at")
+        _job_to_dict(job, files)
         for job in sorted(store.list_jobs(workspace_id), key=lambda j: j["created_at"], reverse=True)
     ]
 
@@ -382,6 +387,7 @@ async def home(request: Request, workspace_id: str):
             "extensions": extensions,
             "scrape_jobs": scrape_jobs,
             "max_upload_bytes": MAX_UPLOAD_BYTES,
+            "chat_url": f"{CHAT_URL}/{workspace_id}",
         },
     )
 
@@ -650,7 +656,7 @@ async def list_scrape_jobs(workspace_id: str):
     files = store.list_files(workspace_id)
     jobs = sorted(store.list_jobs(workspace_id), key=lambda j: j["created_at"], reverse=True)
     return [
-        _job_to_dict(job, sum(1 for f in files if f.get("scrape_job_id") == job["id"]))
+        _job_to_dict(job, files)
         for job in jobs
     ]
 
@@ -664,14 +670,17 @@ async def list_job_pages(workspace_id: str, job_id: str):
         key=lambda f: f["uploaded_at"],
         reverse=True,
     )
+    files.sort(key=lambda f: f.get("status") != "failed")  # failed first; stable sort keeps newest-first within each group
 
     return [
         {
-            "id": f["id"],
+            "id": f["id"] or f["key"],  # a page that never embedded has no doc id; delete finds it by key
             "filename": f["filename"],
             "source_url": f["source_url"],
             "last_checked_at": f["last_checked_at"],
             "uploaded_at": f["uploaded_at"],
+            "status": f.get("status"),
+            "error": f.get("error"),
         }
         for f in files
     ]
@@ -746,7 +755,7 @@ async def update_scrape_job(workspace_id: str, job_id: str, request: Request):
     job = store.update_job(workspace_id, job_id, lambda cur: {**cur, **changes})
     if not job:
         raise HTTPException(status_code=404, detail="Scrape job not found")
-    return _job_to_dict(job, _job_page_count(workspace_id, job_id))
+    return _job_to_dict(job, store.list_files(workspace_id))
 
 
 @app.delete("/{workspace_id}/scrape/jobs/{job_id}", include_in_schema=False)
@@ -781,12 +790,12 @@ async def _fetch_job_url(url, job, existing_files, queue):
     """
     async with SEM:
         workspace_id = job["workspace_id"]
+        filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
+        existing = existing_files.get(url)
         try:
             await queue.put({"url": url, "status": "fetching"})
             content, content_type = await asyncio.to_thread(fetch_page, url)
 
-            filename = _sanitize_url_to_filename(url) + DOCLING_SUFFIX
-            existing = existing_files.get(url)
             record = existing or _new_file_record(
                 workspace_id,
                 filename=filename,
@@ -811,19 +820,28 @@ async def _fetch_job_url(url, job, existing_files, queue):
         except Exception as e:
             print(f"[job-run] error processing {url}: {e}")
             await queue.put({"url": url, "status": "error", "message": str(e)})
-            return None
+            # Kept as a failed page so it shows in the website's page list with its reason
+            return {"url": url, "error": str(e), "existing": existing is not None,
+                    "record": existing or _new_file_record(
+                        workspace_id, filename=filename, original_extension=".html",
+                        category=f"scrape_{job['name']}", source_url=url, scrape_job_id=job["id"],
+                        status="failed", error=str(e))}
 
 
 def _save_job_pages(files: list[dict], pages: list[dict]) -> list[dict]:
     """Add a run's new pages and point its existing ones at their new originals. An
     existing page gets only the fields this run sets, so a result applied in the
     meantime isn't overwritten."""
-    by_key = {p["record"]["key"]: p["record"] for p in pages}
-    updated = [
-        {**f, "original": by_key[f["key"]]["original"], "filename": by_key[f["key"]]["filename"]}
-        if f["key"] in by_key else f
-        for f in files
-    ]
+    by_key = {p["record"]["key"]: p for p in pages}
+
+    def apply(f, page):
+        # Not yet embedded: its status follows this run. An embedded page keeps its current version.
+        if "error" in page:
+            return {**f, "error": page["error"], **({} if f.get("id") else {"status": "failed"})}
+        return {**f, "original": page["record"]["original"], "filename": page["record"]["filename"],
+                **({} if f.get("id") else {"status": "converting", "error": None})}
+
+    updated = [apply(f, by_key[f["key"]]) if f["key"] in by_key else f for f in files]
     present = {f["key"] for f in files}
     return updated + [p["record"] for p in pages if not p["existing"] and p["record"]["key"] not in present]
 
@@ -833,7 +851,8 @@ def _unsave_job_pages(files: list[dict], pages: list[dict]) -> list[dict]:
     originals = {p["record"]["key"]: p["record"]["original"] for p in pages}
     new_keys = {p["record"]["key"] for p in pages if not p["existing"]}
     return [
-        {**f, "original": None} if f.get("original") == originals.get(f["key"]) else f
+        {**f, "original": None, **({} if f.get("id") else {"status": "failed", "error": "could not queue for conversion"})}
+        if f.get("original") == originals.get(f["key"]) else f
         for f in files if f["key"] not in new_keys
     ]
 
@@ -893,7 +912,7 @@ async def _job_run_events(job: dict):
         async def fetch_all():
             pages = await asyncio.gather(*(_fetch_job_url(url, job, existing_files, queue) for url in urls))
             await queue.put(None)
-            return [p for p in pages if p]
+            return pages
 
         task = asyncio.create_task(fetch_all())
 
@@ -903,15 +922,16 @@ async def _job_run_events(job: dict):
                 break
             yield event
 
-        pages = await task
-        if pages:
+        results = await task
+        if results:
             try:
-                await asyncio.to_thread(store.update_files, workspace_id, lambda files: _save_job_pages(files, pages))
+                await asyncio.to_thread(store.update_files, workspace_id, lambda files: _save_job_pages(files, results))
             except Exception as e:
-                await asyncio.to_thread(store.delete_objects, [p["record"]["original"] for p in pages])
-                for p in pages:
+                await asyncio.to_thread(store.delete_objects, [p["record"]["original"] for p in results if "error" not in p])
+                for p in results:
                     yield {"url": p["url"], "status": "error", "message": str(e)}
-                pages = []
+                results = []
+        pages = [p for p in results if "error" not in p]
 
         sent = await asyncio.gather(*(_send_job_page(p, job) for p in pages))
         failed = [p for p, event in zip(pages, sent) if event is None]

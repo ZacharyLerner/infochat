@@ -440,7 +440,8 @@ class TestComputeNextRun:
         ("daily", timedelta(days=1)),
         ("weekly", timedelta(weeks=1)),
         (None, None),
-        ("monthly", None),
+        ("monthly", timedelta(days=30)),
+        ("yearly", None),
     ])
     def test_next_run(self, interval, delta):
         expected = self.BASE + delta if delta else None

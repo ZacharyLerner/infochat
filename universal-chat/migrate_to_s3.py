@@ -43,7 +43,6 @@ def main():
             "welcome_text": row["welcome_text"],
             "followup_enabled": bool(row["followup_enabled"]),
             "followup_count": row["followup_count"],
-            "email_enabled": bool(row["email_enabled"]),
             "default_questions": json.loads(row["default_questions"] or "[]"),
         }
         if not args.apply:

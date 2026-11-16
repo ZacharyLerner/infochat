@@ -356,6 +356,22 @@ def test_run_saves_records_in_one_write_and_rolls_back_failed_sends(client, page
     assert _originals(fake_s3) == [page["original"]]
 
 
+def test_failed_fetch_is_kept_as_failed_page_until_a_retry_works(client, pages, pipeline):
+    job = _job(client)  # https://a.example/one is not on the fake web yet: HTTP 404
+    _run(client, job["id"])
+    [page] = client.get(f"/{WS}/scrape/jobs/{job['id']}/pages").json()
+    assert page["status"] == "failed" and "404" in page["error"] and page["id"]
+    assert client.get(f"/{WS}/scrape/jobs").json()[0]["failed_count"] == 1
+
+    pages["https://a.example/one"] = "<p>one</p>"
+    _run(client, job["id"])  # "Try again"
+    [page] = store.list_files(WS)
+    assert page["status"] == "converting" and page["error"] is None
+    pipeline.run()
+    [page] = store.list_files(WS)
+    assert page["status"] == "ready" and page["id"]
+
+
 def test_overlapping_runs_keep_each_others_originals(client, pages, pipeline, backend, fake_s3):
     pages["https://a.example/one"] = "<p>v1</p>"
     job = _job(client)

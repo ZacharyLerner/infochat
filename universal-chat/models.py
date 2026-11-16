@@ -2,15 +2,6 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-class SendEmailRequest(BaseModel):
-    """Request body for the /api/send-email endpoint."""
-    to: str                     # Recipient address (or comma-separated list)
-    subject: str
-    body: str                   # Plain-text body
-    from_addr: str = "noreply@uri.edu"
-    html: bool = False
-
-
 class ChatRequest(BaseModel):
     message: str
     session_id: str

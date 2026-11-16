@@ -5,15 +5,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 import os
-import smtplib
 import tempfile
 import logging
 import time
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 import anythingllm
-from models import ChatRequest, ChatSessionRequest, SendEmailRequest
+from models import ChatRequest, ChatSessionRequest
 import store
 from schemas import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
 from config import LLM_GW_URL, LLM_GW_KEY, ROOT_PATH
@@ -135,7 +132,9 @@ async def embed_script():
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request, slug: str = ""):
-    return templates.TemplateResponse(request, "settings.html", {"slug": slug})
+    ws = store.get_workspace(slug) if slug else None
+    name = (ws and ws["name"]) or slug
+    return templates.TemplateResponse(request, "settings.html", {"slug": slug, "name": name})
 
 
 @app.get("/{slug}", response_class=HTMLResponse, include_in_schema=False)
@@ -160,7 +159,6 @@ async def chat_endpoint(slug: str, body: ChatRequest):
     ws = store.get_workspace(slug)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{slug}' not found.")
-    email_suffix = anythingllm.EMAIL_PROMPT_SUFFIX if ws["email_enabled"] else ""
     return StreamingResponse(
         anythingllm.stream_chat(
             slug=slug,
@@ -168,7 +166,6 @@ async def chat_endpoint(slug: str, body: ChatRequest):
             session_id=body.session_id,
             reset=body.reset,
             followup_suffix=body.followup_suffix,
-            email_suffix=email_suffix,
         ),
         media_type="text/event-stream",
     )
@@ -231,7 +228,6 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionReque
         f" file='{body.file_context.filename}'" if has_file else "",
     )
 
-    email_suffix = anythingllm.EMAIL_PROMPT_SUFFIX if ws["email_enabled"] else ""
     return StreamingResponse(
         anythingllm.stream_chat_session(
             slug=slug,
@@ -239,7 +235,6 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionReque
             message=body.message,
             history=history,
             followup_suffix=body.followup_suffix,
-            email_suffix=email_suffix,
             file_context=body.file_context.model_dump() if body.file_context else None,
         ),
         media_type="text/event-stream",
@@ -317,57 +312,6 @@ async def upload_file(slug: str, file: UploadFile = File(...)):
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
             logger.debug("upload_file: deleted tmp file %s", tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# Send email — called by the frontend after the user confirms an email action
-# ---------------------------------------------------------------------------
-
-SMTP_HOST = "smtpserv.uri.edu"
-SMTP_PORT = 587
-
-@app.post("/api/send-email", include_in_schema=False)
-async def send_email_endpoint(body: SendEmailRequest):
-    """Send an email via the URI SMTP relay.
-
-    Called by the chat frontend after the user reviews and confirms an email
-    that was drafted by the LLM.  No authentication is required; the server
-    must be reachable on the URI network / VPN.
-    """
-    recipients = [r.strip() for r in body.to.split(",") if r.strip()]
-    if not recipients:
-        raise HTTPException(status_code=400, detail="No valid recipient address provided.")
-
-    logger.info(
-        "send_email_endpoint: to=%s subject='%s' from=%s html=%s",
-        recipients, body.subject, body.from_addr, body.html,
-    )
-
-    msg = MIMEMultipart()
-    msg["From"] = body.from_addr
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = body.subject
-    content_type = "html" if body.html else "plain"
-    msg.attach(MIMEText(body.body, content_type))
-
-    try:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.sendmail(body.from_addr, recipients, msg.as_string())
-        server.quit()
-        logger.info("send_email_endpoint: sent successfully to %s", recipients)
-        return JSONResponse({"ok": True, "message": f"Email sent to {', '.join(recipients)}"})
-    except smtplib.SMTPException as exc:
-        logger.error("send_email_endpoint: SMTP error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"SMTP error: {exc}")
-    except OSError as exc:
-        logger.error("send_email_endpoint: connection error (VPN?): %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=503,
-            detail="Could not connect to the mail server. Make sure you are on the URI network or VPN.",
-        )
 
 
 # ---------------------------------------------------------------------------

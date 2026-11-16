@@ -61,7 +61,6 @@ class WorkspaceCreate(BaseModel):
     welcome_text: str = Field(default="Send a message to get started.", max_length=300, description="Empty-state text shown in the chat window before any messages.")
     followup_enabled: bool = Field(default=False, description="When true, the LLM is prompted to append follow-up question suggestions to each response.")
     followup_count: int = Field(default=3, ge=1, le=5, description="Number of follow-up questions to generate (1–5).")
-    email_enabled: bool = Field(default=False, description="When true, the email skill prompt is injected into every request, allowing users to send emails via the chat.")
     canned_delay_seconds: float = Field(default=1.0, ge=0, le=30, description="Seconds the typing indicator shows before a canned answer.")
     default_questions: list[DefaultQuestionCategory] = Field(
         default=[],
@@ -85,7 +84,6 @@ class WorkspaceUpdate(BaseModel):
     welcome_text: str = Field(default="Send a message to get started.", max_length=300, description="Empty-state text shown in the chat window before any messages.")
     followup_enabled: bool = Field(default=False, description="When true, the LLM is prompted to append follow-up question suggestions to each response.")
     followup_count: int = Field(default=3, ge=1, le=5, description="Number of follow-up questions to generate (1–5).")
-    email_enabled: bool = Field(default=False, description="When true, the email skill prompt is injected into every request.")
     canned_delay_seconds: float = Field(default=1.0, ge=0, le=30, description="Seconds the typing indicator shows before a canned answer.")
     default_questions: list[DefaultQuestionCategory] = Field(
         default=[],
@@ -112,6 +110,5 @@ class WorkspaceResponse(BaseModel):
     welcome_text: str
     followup_enabled: bool
     followup_count: int
-    email_enabled: bool
     canned_delay_seconds: float = 1.0
     default_questions: list[DefaultQuestionCategory] = []
