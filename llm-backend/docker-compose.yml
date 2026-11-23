@@ -28,6 +28,9 @@ services:
       - ROOT_PATH=/admin
       # Names the self-signed cert is valid for: the address chat and the uploader use (RAG_API_URL).
       - CERT_SAN=IP:10.140.2.160,DNS:localhost,IP:127.0.0.1
+      # Only chat and the uploader (10.140.2.31) and this host's own checks may send the admin key
+      # in X-API-Key; the admin UI logs in for a session cookie, other callers use workspace keys.
+      - TRUSTED_SERVICE_IPS=10.140.2.31,127.0.0.1,::1
     volumes:
       - certs:/certs
     # All state lives in AWS: vectors in S3 Vectors (S3_VECTOR_BUCKET), settings

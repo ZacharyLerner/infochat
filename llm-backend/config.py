@@ -33,6 +33,11 @@ ACTIVITY_LOG_GROUP = os.getenv("ACTIVITY_LOG_GROUP", "infochat-activity")
 # Admin API key (read from ADMIN_API_KEY in .env)
 APP_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
+# Addresses (IPs or CIDRs, comma-separated; "*" = anywhere) allowed to send the admin key in
+# X-API-Key: chat and the uploader. Everyone else logs in to the admin UI (session cookie) or
+# uses a workspace key. Set for production in docker-compose.yml.
+TRUSTED_SERVICE_IPS = os.getenv("TRUSTED_SERVICE_IPS", "127.0.0.1,::1")
+
 # Interactive API docs (Swagger UI / ReDoc / raw OpenAPI schema) are served
 # by FastAPI on internal routes that bypass this app's own auth dependency
 # system, so they are unauthenticated by design. Disabled by default —

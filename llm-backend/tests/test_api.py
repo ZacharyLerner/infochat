@@ -78,6 +78,48 @@ class TestAuth:
         assert test_client.put(f"/api/workspace/{slug}", json={"name": "x"}, headers=own).status_code == 403
         assert test_client.delete(f"/api/workspace/{slug}", headers=own).status_code == 403
 
+    @pytest.mark.parametrize("peer, trusted, expected", [
+        ("10.140.2.31", "10.140.2.31,127.0.0.1", 200),     # chat / uploader
+        ("127.0.0.1", "10.140.2.31,127.0.0.1", 200),       # the backend host's own checks
+        ("131.128.1.77", "10.140.2.31,127.0.0.1", 403),    # anyone through the load balancer
+        ("10.140.9.9", "10.140.2.0/28", 403),
+        ("10.140.2.5", "10.140.2.0/28", 200),
+    ])
+    def test_admin_key_header_only_from_trusted_services(self, test_client, monkeypatch, peer, trusted, expected):
+        import config, main
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(config, "TRUSTED_SERVICE_IPS", trusted)
+        client = TestClient(main.app, client=(peer, 50000))
+        assert client.get("/api/workspaces", headers=AUTH_HEADERS).status_code == expected
+
+    def test_admin_ui_logs_in_for_a_session_cookie(self, test_client, workspace, monkeypatch):
+        import config, main
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(config, "TRUSTED_SERVICE_IPS", "10.140.2.31")
+        browser = TestClient(main.app, base_url="https://testserver", client=("131.128.1.77", 50000))
+        assert browser.get("/api/workspaces", headers=AUTH_HEADERS).status_code == 403
+        assert browser.post("/api/auth/login", json={"key": "wrong"}).status_code == 403
+        resp = browser.post("/api/auth/login", json={"key": AUTH_HEADERS["X-API-Key"]})
+        assert resp.status_code == 200
+        cookie = resp.headers["set-cookie"].lower()
+        assert all(flag in cookie for flag in ("httponly", "secure", "samesite=strict"))
+        assert browser.get("/api/workspaces").status_code == 200        # cookie, no key sent
+        # Workspace keys still work from anywhere, on their own workspace
+        assert browser.get(f"/api/docs/{workspace['slug']}", cookies={},
+                           headers={"X-API-Key": workspace["access_key"]}).status_code == 200
+        browser.post("/api/auth/logout")
+        assert browser.get("/api/workspaces").status_code == 403
+
+    def test_session_is_signed_and_expires(self, monkeypatch):
+        import main
+        token = main._new_session()
+        assert main._valid_session(token)
+        expires, sig = token.split(".")
+        assert not main._valid_session(f"{int(expires) + 999}.{sig}")   # tampered expiry
+        assert not main._valid_session("garbage") and not main._valid_session(None)
+        monkeypatch.setattr(main._time, "time", lambda: int(expires) + 1)
+        assert not main._valid_session(token)                            # expired
+
     def test_startup_gives_old_workspaces_a_key(self, test_client):
         import db, main
         ws = db.create_workspace(name="Old")

@@ -16,7 +16,7 @@ function appPath() {
 // =====================================================
 // STATE
 // =====================================================
-let apiKey = '';
+let loggedIn = false;  // the session itself is an HttpOnly cookie set by /auth/login
 let currentWorkspaceSlug = null;
 let currentWorkspaceName = '';
 let activeStreamController = null;
@@ -101,11 +101,15 @@ async function apiFetch(path, options = {}) {
     ...options,
     headers: {
       'Accept': 'application/json',
-      'X-API-Key': apiKey,
       'X-Infochat-Source': 'admin-ui',
       ...(options.headers || {}),
     },
   });
+  // The only 403 the API sends is "not logged in": the session expired or was ended
+  if (res.status === 403 && loggedIn) {
+    loggedIn = false;
+    showLogin();
+  }
   return res;
 }
 
@@ -113,33 +117,25 @@ async function apiFetch(path, options = {}) {
 // AUTH
 // =====================================================
 
-function loadApiKey() {
-  const stored = sessionStorage.getItem('infochat_api_key');
-  if (stored) {
-    apiKey = stored;
-    return true;
-  }
-  return false;
-}
-
-function saveApiKey(key) {
-  apiKey = key;
-  sessionStorage.setItem('infochat_api_key', key);
-}
-
-function clearApiKey() {
-  apiKey = '';
-  sessionStorage.removeItem('infochat_api_key');
-}
-
-async function validateKey(key) {
+/** True if the browser holds a valid admin session cookie. */
+async function checkSession() {
   try {
-    const res = await fetch(API_BASE + '/settings', {
-      headers: { 'Accept': 'application/json', 'X-API-Key': key },
+    const res = await fetch(API_BASE + '/auth/verify', { headers: { 'Accept': 'application/json' } });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Exchange the admin key for a session cookie; the key itself is not kept. */
+async function logIn(key) {
+  try {
+    const res = await fetch(API_BASE + '/auth/login', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
     });
-    if (res.status === 403) return false;
-    const ct = res.headers.get('content-type') || '';
-    return res.ok && ct.includes('application/json');
+    return res.ok;
   } catch {
     return false;
   }
@@ -154,9 +150,8 @@ loginForm.addEventListener('submit', async (e) => {
   loginError.classList.remove('hidden');
   loginError.style.color = '#757575';
 
-  const valid = await validateKey(key);
-  if (valid) {
-    saveApiKey(key);
+  if (await logIn(key)) {
+    loggedIn = true;
     showApp();
   } else {
     loginError.textContent = 'Invalid API key or server unreachable.';
@@ -164,8 +159,9 @@ loginForm.addEventListener('submit', async (e) => {
   }
 });
 
-logoutBtn.addEventListener('click', () => {
-  clearApiKey();
+logoutBtn.addEventListener('click', async () => {
+  loggedIn = false;
+  await fetch(API_BASE + '/auth/logout', { method: 'POST' }).catch(() => {});
   showLogin();
 });
 
@@ -362,7 +358,7 @@ navBtns.forEach(btn => {
 
 // Browser back/forward
 window.addEventListener('popstate', () => {
-  if (apiKey) router();
+  if (loggedIn) router();
 });
 
 // =====================================================
@@ -1455,14 +1451,12 @@ activityFilters.addEventListener('change', (e) => {
 // =====================================================
 
 (async function init() {
-  if (loadApiKey()) {
-    const valid = await validateKey(apiKey);
-    if (valid) {
-      showApp();
-      return;
-    } else {
-      clearApiKey();
-    }
+  // Older versions kept the admin key itself in sessionStorage; don't leave it behind
+  try { sessionStorage.removeItem('infochat_api_key'); } catch {}
+  if (await checkSession()) {
+    loggedIn = true;
+    showApp();
+    return;
   }
   showLogin();
 })();

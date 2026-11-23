@@ -110,6 +110,8 @@ def isolate_config(tmp_path, monkeypatch):
 
     import config
     monkeypatch.setattr(config, "APP_API_KEY", TEST_API_KEY)
+    # Most tests call with the admin key in X-API-Key, as chat and the uploader do
+    monkeypatch.setattr(config, "TRUSTED_SERVICE_IPS", "*")
     # Activity events are queued here instead of going to CloudWatch
     monkeypatch.setattr(config, "ACTIVITY_LOG_GROUP", "test-activity")
     import activity

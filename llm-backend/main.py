@@ -92,10 +92,62 @@ def _is_workspace_key(request: Request, key: str) -> bool:
     return bool(ws and ws.get("access_key")) and hmac.compare_digest(key.encode(), ws["access_key"].encode())
 
 
+# The admin key is only for logging in to the admin UI (which then uses a session cookie) and for
+# chat and the uploader, which send it in X-API-Key from TRUSTED_SERVICE_IPS. From anywhere else,
+# an admin key in X-API-Key is refused; programmatic callers use their workspace's own key.
+SESSION_COOKIE = "infochat_admin"
+SESSION_SECONDS = 12 * 3600
+
+
+def _is_admin_key(key: Optional[str]) -> bool:
+    return bool(key) and hmac.compare_digest(key.encode(), config.APP_API_KEY.encode())
+
+
+def _session_sig(expires: int) -> str:
+    # Signed with the admin key, so changing the key ends every session
+    return hmac.new(config.APP_API_KEY.encode(), f"admin-session.{expires}".encode(), "sha256").hexdigest()
+
+
+def _new_session() -> str:
+    expires = int(_time.time()) + SESSION_SECONDS
+    return f"{expires}.{_session_sig(expires)}"
+
+
+def _valid_session(token: Optional[str]) -> bool:
+    try:
+        expires_s, sig = (token or "").split(".", 1)
+        expires = int(expires_s)
+    except ValueError:
+        return False
+    return expires > _time.time() and hmac.compare_digest(sig.encode(), _session_sig(expires).encode())
+
+
+def _from_trusted_service(request: Request) -> bool:
+    """True if the TCP peer is one of our own services (chat, uploader, the backend host)."""
+    import ipaddress
+    trusted = [t.strip() for t in config.TRUSTED_SERVICE_IPS.split(",") if t.strip()]
+    if "*" in trusted:
+        return True
+    try:
+        peer = ipaddress.ip_address(request.client.host if request.client else "")
+    except ValueError:
+        return False
+    for t in trusted:
+        try:
+            if peer in ipaddress.ip_network(t, strict=False):
+                return True
+        except ValueError:
+            _log.warning("ignoring bad TRUSTED_SERVICE_IPS entry %r", t)
+    return False
+
+
 def verify_admin_key(request: Request, key: Optional[str] = Security(api_key_header)):
-    """Require the admin key on all API endpoints when it is configured, or, on a
-    workspace's own routes, that workspace's access key (for programmatic callers)."""
-    if not config.APP_API_KEY or (key and hmac.compare_digest(key.encode(), config.APP_API_KEY.encode())):
+    """Allow an admin UI session, the admin key from a trusted service, or, on a workspace's
+    own routes, that workspace's access key. With no admin key configured, everything is open."""
+    if not config.APP_API_KEY or _valid_session(request.cookies.get(SESSION_COOKIE)):
+        request.state.caller = "admin"
+        return
+    if _is_admin_key(key) and _from_trusted_service(request):
         request.state.caller = "admin"
         return
     if key and _is_workspace_key(request, key):
@@ -154,6 +206,34 @@ app.add_middleware(RootPathMiddleware)
 # header. All actual data continues to require the key via apiFetch() in
 # app.js, which does attach the header on every XHR/fetch call.
 api_router = APIRouter(dependencies=[Depends(verify_admin_key)])
+
+
+# --- Admin UI login (no auth dependency: this is where the key is checked) ----
+auth_router = APIRouter()
+
+
+class LoginRequest(BaseModel):
+    key: str = Field(max_length=500)
+
+
+@auth_router.post("/auth/login", summary="Log in to the admin UI")
+def login(body: LoginRequest):
+    from fastapi.responses import JSONResponse
+    if config.APP_API_KEY and not _is_admin_key(body.key):
+        _log.warning("admin login refused")
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    resp = JSONResponse({"status": "ok"})
+    resp.set_cookie(SESSION_COOKIE, _new_session(), max_age=SESSION_SECONDS,
+                    httponly=True, secure=True, samesite="strict", path="/")
+    return resp
+
+
+@auth_router.post("/auth/logout", summary="Log out of the admin UI")
+def logout():
+    from fastapi.responses import JSONResponse
+    resp = JSONResponse({"status": "ok"})
+    resp.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+    return resp
 
 
 # --- Auth verification endpoint ----------------------------------------------
@@ -760,6 +840,7 @@ async def list_chatbot_owners():
 app.include_router(api_router, prefix="/api")
 # Intake is the one unauthenticated API (campus network only); see intake.py.
 app.include_router(intake.router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 
 
 # --- Static files (frontend) -------------------------------------------------
