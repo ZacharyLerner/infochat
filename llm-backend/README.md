@@ -99,6 +99,35 @@ curl -X POST localhost:3001/api/workspace/<slug>/query -H "$H" -H "Content-Type:
   -d '{"question": "What are the library hours?"}'
 ```
 
+Each workspace also has its own API key, shown on its Settings tab in the admin UI. Give that key to
+someone who calls one workspace programmatically: it works on that workspace's `/api/workspace/<slug>/...`
+and `/api/docs/<slug>` routes, but not on other workspaces, global routes, or `PUT`/`DELETE
+/api/workspace/<slug>`. Workspaces made before these keys existed get one when the backend starts.
+
+## Activity log
+
+Chats, queries, uploads, document deletes and workspace/settings changes in every workspace are sent to the
+CloudWatch Logs group `ACTIVITY_LOG_GROUP` (default `infochat-activity`, 400-day retention; blank turns it
+off) and shown on the admin UI's **Activity** page, filterable by gateway key prefix, workspace, event and
+time. Each event records the workspace's gateway key *prefix* (`its_rhodyrag_prod`, from its model names),
+whether the admin key or the workspace's own key was used, and the calling service (`X-Infochat-Source`:
+`chat`, `uploader`, `admin-ui`, `intake`, or `api` when absent). Keys, questions and answers are never
+logged there. Events are queued in memory and sent in batches every 5 s (see `activity.py`).
+
+The backend's AWS user needs this policy (inline policy `infochat-activity-log` on
+`zl-infochat-vector-manager`); the log groups themselves were created by hand:
+
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents", "logs:StartQuery"],
+   "Resource": ["arn:aws:logs:us-east-1:727646498592:log-group:infochat-activity*",
+                "arn:aws:logs:us-east-1:727646498592:log-group:infochat-activity*:*"]},
+  {"Effect": "Allow", "Action": ["logs:GetQueryResults"], "Resource": "*"}]}
+```
+
+Ad-hoc questions can go straight to CloudWatch Logs Insights, e.g.
+`stats count(*) by key_prefix, event | sort count desc`.
+
 The embedding model is fixed once a workspace is created.
 
 ## DoclingDocument uploads and citations

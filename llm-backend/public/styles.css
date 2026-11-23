@@ -107,7 +107,7 @@ button { font: inherit; cursor: pointer; }
 .action-link.danger:hover { color: var(--error); }
 
 /* ---------- Lists: an outlined box, a grey header strip, rules between rows (as the uploader's file list) ---------- */
-#workspace-list-container, #doc-table, #log-entries, .sources-box {
+#workspace-list-container, #doc-table, #log-entries, .sources-box, .activity-box {
   border: 1px solid var(--border-strong); border-radius: 4px; overflow: hidden;
 }
 #workspace-list-container > p { padding: 12px; }
@@ -283,3 +283,11 @@ input:disabled { background: var(--gray-light); color: var(--gray-mid); border-c
   .log-entry-header { flex-direction: column; gap: 2px; }
   .log-entry-size, .log-entry-time { min-width: 0; text-align: left; }
 }
+
+/* ---------- Activity ---------- */
+.activity-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 20px; }
+.activity-filters select { width: auto; max-width: 100%; padding: 6px 8px; font-size: 13px; }
+.activity-box { overflow-x: auto; margin-bottom: 24px; }
+.activity-box td, .activity-box th { font-size: 13px; white-space: nowrap; }
+.activity-box th:last-child, .activity-box td:last-child { text-align: left; }
+.activity-box td.num, .activity-box th.num { text-align: right; }

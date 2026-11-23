@@ -110,6 +110,11 @@ def isolate_config(tmp_path, monkeypatch):
 
     import config
     monkeypatch.setattr(config, "APP_API_KEY", TEST_API_KEY)
+    # Activity events are queued here instead of going to CloudWatch
+    monkeypatch.setattr(config, "ACTIVITY_LOG_GROUP", "test-activity")
+    import activity
+    monkeypatch.setattr(activity, "_start", lambda: None)
+    monkeypatch.setattr(activity, "_pending", [])
 
     # Settings and document records go to an in-memory fake bucket
     import db

@@ -19,6 +19,7 @@ Coverage
 """
 
 import io
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,6 +63,28 @@ class TestAuth:
         # Chat and the uploader call the API without the prefix; the load balancer sends it with
         for path in ("/api/auth/verify", "/admin/api/auth/verify"):
             assert test_client.get(path, headers=AUTH_HEADERS).status_code == 200
+
+    def test_workspace_key_only_opens_its_own_workspace(self, test_client, workspace):
+        other = test_client.post("/api/workspace", json={"name": "Other"}, headers=AUTH_HEADERS).json()
+        key = workspace["access_key"]
+        assert len(key) == len(AUTH_HEADERS["X-API-Key"]) and key != other["access_key"]
+        own = {"X-API-Key": key}
+        slug = workspace["slug"]
+        assert test_client.get(f"/api/docs/{slug}", headers=own).status_code == 200
+        assert test_client.get(f"/api/workspace/{slug}", headers=own).status_code == 200
+        # Not another workspace, not admin-wide routes, and not changing or deleting itself
+        assert test_client.get(f"/api/docs/{other['slug']}", headers=own).status_code == 403
+        assert test_client.get("/api/workspaces", headers=own).status_code == 403
+        assert test_client.put(f"/api/workspace/{slug}", json={"name": "x"}, headers=own).status_code == 403
+        assert test_client.delete(f"/api/workspace/{slug}", headers=own).status_code == 403
+
+    def test_startup_gives_old_workspaces_a_key(self, test_client):
+        import db, main
+        ws = db.create_workspace(name="Old")
+        db._update_json(db._ws_key(ws["slug"], "settings.json"),
+                        lambda cur: {k: v for k, v in cur.items() if k != "access_key"})
+        main._ensure_indexes()
+        assert len(db.get_workspace(ws["slug"])["access_key"]) == len(AUTH_HEADERS["X-API-Key"])
 
 
 # ---------------------------------------------------------------------------
@@ -223,3 +246,70 @@ class TestListModels:
     def test_unknown_workspace_and_missing_key_are_rejected(self, test_client):
         assert test_client.post("/api/models", json={"workspace": "nope"}, headers=AUTH_HEADERS).status_code == 404
         assert test_client.post("/api/models", json={}, headers=AUTH_HEADERS).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Activity log
+# ---------------------------------------------------------------------------
+
+class TestActivity:
+    def _events(self):
+        import activity
+        return [json.loads(e["message"]) for e in activity._pending]
+
+    def test_upload_by_workspace_key_logs_prefix_not_key(self, test_client, workspace):
+        slug, key = workspace["slug"], workspace["access_key"]
+        with patch("main.embedding.embed_workspace_file", return_value=(3, TestEmbedEndpoints.FAKE_DOC_ID)):
+            resp = test_client.post(f"/api/workspace/{slug}/embed", files={"file": ("a.txt", io.BytesIO(b"hi"), "text/plain")},
+                                    headers={"X-API-Key": key, "X-Infochat-Source": "uploader"})
+        assert resp.status_code == 200
+        upload = [e for e in self._events() if e["event"] == "upload"]
+        assert upload == [{"event": "upload", "workspace": slug, "workspace_name": "Test Workspace",
+                           "key_prefix": "openai", "caller": "workspace_key", "source": "uploader",
+                           "filename": "a.txt", "doc_id": TestEmbedEndpoints.FAKE_DOC_ID, "chunks": 3, "bytes": 2}]
+        import activity
+        assert all(key not in e["message"] for e in activity._pending)
+
+    def test_admin_create_and_query_logged(self, test_client, workspace):
+        with patch("main.query.query_workspace", return_value=_MOCK_QUERY_RESULT):
+            test_client.post(f"/api/workspace/{workspace['slug']}/query", json={"question": "Q?"}, headers=AUTH_HEADERS)
+        events = self._events()
+        assert [e["event"] for e in events] == ["workspace_create", "query"]
+        assert events[1]["caller"] == "admin" and events[1]["source"] == "api" and "duration_ms" in events[1]
+        assert "Q?" not in json.dumps(events)  # questions stay in the per-workspace log only
+
+    def test_activity_route_is_admin_only_and_validates_filters(self, test_client, workspace):
+        own = {"X-API-Key": workspace["access_key"]}
+        assert test_client.get("/api/activity", headers=own).status_code == 403
+        assert test_client.get('/api/activity?key_prefix=x" or 1', headers=AUTH_HEADERS).status_code == 400
+
+    def test_activity_route_builds_filtered_queries(self, test_client, workspace):
+        import activity
+        calls = []
+
+        def fake(query, start, end, limit):
+            calls.append(query)
+            return [{"key_prefix": "old_prefix", "workspace": "gone", "event": "chat", "count": "2"}] if "stats" in query else []
+        with patch.object(activity, "_insights", side_effect=fake):
+            resp = test_client.get("/api/activity?key_prefix=openai&event=chat&hours=48", headers=AUTH_HEADERS)
+        assert resp.status_code == 200, resp.text
+        assert all('filter key_prefix = "openai" and event = "chat"' in q for q in calls) and len(calls) == 2
+        body = resp.json()
+        assert body["key_prefixes"] == ["old_prefix", "openai"]
+        assert body["workspaces"] == [{"slug": workspace["slug"], "name": "Test Workspace", "key_prefix": "openai"}]
+
+    def test_flush_batches_and_keeps_events_when_cloudwatch_fails(self, monkeypatch):
+        import activity
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        client.put_log_events.side_effect = [RuntimeError("down"), None, None]
+        monkeypatch.setattr(activity, "_logs", lambda: client)
+        monkeypatch.setattr(activity, "_MAX_BATCH", 2)
+        for i in range(3):
+            activity.record("chat", {"slug": f"s{i}", "llm_model": "p/m"})
+        activity.flush()                      # CloudWatch down: nothing lost
+        assert len(activity._pending) == 3
+        activity.flush()                      # back up: sent as batches of 2 and 1
+        assert activity._pending == []
+        sizes = [len(c.kwargs["logEvents"]) for c in client.put_log_events.call_args_list]
+        assert sizes == [2, 2, 1]

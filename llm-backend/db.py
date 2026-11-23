@@ -17,6 +17,7 @@ multiple containers never overwrite each other's changes.
 import json
 import random
 import re
+import secrets
 import string
 import time
 import uuid
@@ -219,9 +220,23 @@ def create_workspace(
         "searxng_query_suffix": searxng_query_suffix if searxng_query_suffix is not None else defaults["searxng_query_suffix"],
         "rewrite_model": rewrite_model or defaults["rewrite_model"],
         "rewrite_prompt": rewrite_prompt or defaults["rewrite_prompt"],
+        "access_key": _new_access_key(),
     }
     _put_json(_ws_key(ws["slug"], "settings.json"), ws, if_none_match=True)
     return ws
+
+
+def _new_access_key() -> str:
+    """Random hex key the same length as the admin key (64 if that is unset)."""
+    length = len(config.APP_API_KEY) or 64
+    return secrets.token_hex(length)[:length]
+
+
+def ensure_access_key(slug: str) -> None:
+    """Give a workspace made before per-workspace keys existed its own key."""
+    _update_json(_ws_key(slug, "settings.json"),
+                 lambda cur: cur if cur.get("access_key") else {**cur, "access_key": _new_access_key()},
+                 create=False)
 
 
 def get_workspace(slug: str) -> Optional[dict]:

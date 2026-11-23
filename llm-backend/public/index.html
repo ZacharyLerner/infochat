@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <base href="/" />
   <title>Infochat Admin</title>
-  <link rel="stylesheet" href="styles.css?v=11" />
+  <link rel="stylesheet" href="styles.css?v=12" />
 </head>
 <body>
 
@@ -40,6 +40,7 @@
       </div>
       <nav>
         <button class="nav-btn active" data-view="workspaces">Workspaces</button>
+        <button class="nav-btn" data-view="activity">Activity</button>
         <button class="nav-btn" data-view="settings">Global settings</button>
       </nav>
     </aside>
@@ -88,6 +89,13 @@
         <!-- Tab: Settings -->
         <div id="ws-settings" class="tab-panel active">
           <form id="workspace-settings-form" class="settings-form">
+            <div class="form-row full-width">
+              <label>Workspace API key</label>
+              <div style="display: flex; gap: 8px;">
+                <input type="password" name="access_key" readonly spellcheck="false" style="flex: 1;" />
+                <button type="button" id="access-key-toggle" class="btn-secondary">Show</button>
+              </div>
+            </div>
             <div class="form-row">
               <label>LLM model</label>
               <select name="llm_model"><option value="">Not set</option></select>
@@ -399,9 +407,55 @@
         </form>
       </section>
 
+      <!-- ACTIVITY VIEW -->
+      <section id="view-activity" class="view hidden">
+        <div class="view-header">
+          <h2>Activity</h2>
+        </div>
+        <form id="activity-filters" class="activity-filters">
+          <select name="key_prefix" aria-label="API key prefix"><option value="">All key prefixes</option></select>
+          <select name="workspace" aria-label="Workspace"><option value="">All workspaces</option></select>
+          <select name="event" aria-label="Event">
+            <option value="">All events</option>
+            <option value="chat">Chat</option>
+            <option value="query">Query</option>
+            <option value="upload">Upload</option>
+            <option value="delete_document">Document deleted</option>
+            <option value="workspace_create">Workspace created</option>
+            <option value="workspace_update">Workspace updated</option>
+            <option value="workspace_delete">Workspace deleted</option>
+            <option value="settings_update">Global settings updated</option>
+          </select>
+          <select name="hours" aria-label="Time range">
+            <option value="1">Last hour</option>
+            <option value="24" selected>Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+            <option value="720">Last 30 days</option>
+          </select>
+          <button type="submit" class="btn-secondary">Refresh</button>
+          <span id="activity-msg" class="muted"></span>
+        </form>
+
+        <h3>Totals</h3>
+        <div class="activity-box">
+          <table>
+            <thead><tr><th>Key prefix</th><th>Workspace</th><th class="num">Chats</th><th class="num">Queries</th><th class="num">Uploads</th><th class="num">Other</th><th class="num">Total</th></tr></thead>
+            <tbody id="activity-counts"></tbody>
+          </table>
+        </div>
+
+        <h3>Recent events</h3>
+        <div class="activity-box">
+          <table>
+            <thead><tr><th>Time</th><th>Event</th><th>Workspace</th><th>Key prefix</th><th>Caller</th><th>Source</th><th>Details</th></tr></thead>
+            <tbody id="activity-events"></tbody>
+          </table>
+        </div>
+      </section>
+
     </main>
   </div>
 
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

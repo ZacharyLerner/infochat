@@ -27,6 +27,9 @@ DOCLING_TOKENIZER = os.getenv("DOCLING_TOKENIZER", "Qwen/Qwen3-Embedding-8B")
 # and document records as JSON — see db.py.
 S3_STATE_BUCKET = os.getenv("S3_STATE_BUCKET", "zl-workspace-storage-727646498592-us-east-1-an")
 
+# CloudWatch Logs group for the activity log (see activity.py); blank turns it off.
+ACTIVITY_LOG_GROUP = os.getenv("ACTIVITY_LOG_GROUP", "infochat-activity")
+
 # Admin API key (read from ADMIN_API_KEY in .env)
 APP_API_KEY = os.getenv("ADMIN_API_KEY", "")
 

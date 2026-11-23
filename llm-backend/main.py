@@ -19,18 +19,21 @@ _httpx_logger.setLevel(_logging.WARNING)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import datetime
+import hmac
+import time as _time
 import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Security, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Security, Depends, Request
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import activity
 import config
 import db
 import docling_chunks
@@ -52,6 +55,11 @@ def _ensure_indexes() -> None:
         log.warning("could not list workspaces from S3: %s", exc)
         return
     for ws in workspaces:
+        if not ws.get("access_key"):
+            try:
+                db.ensure_access_key(ws["slug"])
+            except Exception as exc:
+                log.warning("could not add an access key to workspace '%s': %s", ws["slug"], exc)
         try:
             embedding.ensure_workspace_index(ws)
         except Exception as exc:
@@ -65,16 +73,35 @@ async def lifespan(app: FastAPI):
     import asyncio
     await asyncio.to_thread(_ensure_indexes)
     yield
+    await asyncio.to_thread(activity.flush)
 
 
 # --- Auth (admin key required on all API routes) -----------------------------
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-async def verify_admin_key(key: Optional[str] = Security(api_key_header)):
-    """Require APP_API_KEY on all API endpoints when it is configured."""
-    if config.APP_API_KEY and key != config.APP_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+def _is_workspace_key(request: Request, key: str) -> bool:
+    """True if `key` is the access key of the workspace named in this route's {slug}."""
+    slug = request.path_params.get("slug")
+    if not slug:
+        return False
+    # Admin only: changing the workspace's models/gateway key (PUT) or deleting it
+    if request.method in ("PUT", "DELETE") and request.url.path.endswith(f"/api/workspace/{slug}"):
+        return False
+    ws = db.get_workspace(slug)
+    return bool(ws and ws.get("access_key")) and hmac.compare_digest(key.encode(), ws["access_key"].encode())
+
+
+def verify_admin_key(request: Request, key: Optional[str] = Security(api_key_header)):
+    """Require the admin key on all API endpoints when it is configured, or, on a
+    workspace's own routes, that workspace's access key (for programmatic callers)."""
+    if not config.APP_API_KEY or (key and hmac.compare_digest(key.encode(), config.APP_API_KEY.encode())):
+        request.state.caller = "admin"
+        return
+    if key and _is_workspace_key(request, key):
+        request.state.caller = "workspace_key"
+        return
+    raise HTTPException(status_code=403, detail="Invalid or missing API key")
 
 
 app = FastAPI(
@@ -268,8 +295,9 @@ def get_settings():
 
 
 @api_router.put("/settings", summary="Update global settings")
-def update_settings(body: UpdateSettings):
+def update_settings(body: UpdateSettings, request: Request):
     fields = body.model_dump()
+    activity.record("settings_update", request=request, changed=sorted(k for k, v in fields.items() if v is not None))
     if fields.get("searxng_enabled") is not None:
         fields["searxng_enabled"] = int(fields["searxng_enabled"])
     # Clamp num_results to 1–10
@@ -297,7 +325,7 @@ def list_workspaces():
 
 
 @api_router.post("/workspace", summary="Create a new workspace")
-def create_workspace(body: CreateWorkspace):
+def create_workspace(body: CreateWorkspace, request: Request):
     ws = db.create_workspace(
         name=body.name,
         llm_model=body.llm_model or "",
@@ -321,6 +349,7 @@ def create_workspace(body: CreateWorkspace):
         db.delete_workspace(ws["slug"])
         raise HTTPException(status_code=502, detail=f"Could not create vector index: {exc}")
     manager.on_workspace_created(slug=ws["slug"], name=ws["name"])
+    activity.record("workspace_create", ws, request)
     return _mask_keys(ws)
 
 
@@ -333,7 +362,7 @@ def get_workspace(slug: str):
 
 
 @api_router.put("/workspace/{slug}", summary="Update a workspace")
-def update_workspace(slug: str, body: UpdateWorkspace):
+def update_workspace(slug: str, body: UpdateWorkspace, request: Request):
     if db.get_workspace(slug) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     fields = body.model_dump()
@@ -342,11 +371,12 @@ def update_workspace(slug: str, body: UpdateWorkspace):
     ws = db.update_workspace(slug, **fields)
     if body.name is not None:
         manager.on_workspace_renamed(slug=slug, new_name=body.name)
+    activity.record("workspace_update", ws, request, changed=sorted(k for k, v in fields.items() if v is not None))
     return _mask_keys(ws)
 
 
 @api_router.delete("/workspace/{slug}", summary="Delete a workspace")
-async def delete_workspace(slug: str):
+async def delete_workspace(slug: str, request: Request):
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
@@ -361,6 +391,7 @@ async def delete_workspace(slug: str):
     # Removes the workspace's settings, document records and logs
     await asyncio.to_thread(db.delete_workspace, slug)
     manager.on_workspace_deleted(slug=slug)  # fire-and-forget background thread
+    activity.record("workspace_delete", ws, request)
     return {"status": "ok", "slug": slug}
 
 
@@ -377,7 +408,7 @@ def _record_doc(slug: str, doc_id: str, filename: str, chunks: int) -> None:
 
 
 @api_router.post("/workspace/{slug}/embed", summary="Upload and embed a file")
-async def embed_file(slug: str, file: UploadFile = File(..., description="File to parse and embed. Supported types include PDF, DOCX, plain text, and DoclingDocument JSON named *.docling.json (chunked by section, with title and link kept for citations).")):
+async def embed_file(slug: str, request: Request, file: UploadFile = File(..., description="File to parse and embed. Supported types include PDF, DOCX, plain text, and DoclingDocument JSON named *.docling.json (chunked by section, with title and link kept for citations).")):
     import asyncio, io
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
@@ -416,12 +447,13 @@ async def embed_file(slug: str, file: UploadFile = File(..., description="File t
             detail=f"Could not record '{filename}'; its embeddings were removed. Retry the upload.",
         )
 
+    activity.record("upload", ws, request, filename=filename, doc_id=doc_id, chunks=chunks, bytes=len(file_bytes))
     return {"status": "ok", "slug": slug, "filename": filename,
             "doc_id": doc_id, "chunks_embedded": chunks}
 
 
 @api_router.delete("/workspace/{slug}/embed/{doc_id:path}", summary="Delete an embedded file")
-async def delete_embed(slug: str, doc_id: str):
+async def delete_embed(slug: str, doc_id: str, request: Request):
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
@@ -444,13 +476,14 @@ async def delete_embed(slug: str, doc_id: str):
     )
 
     await asyncio.to_thread(db.remove_doc, slug, doc_id)
+    activity.record("delete_document", ws, request, doc_id=doc_id, filename=record.get("filename"))
 
     return {"status": "ok", "slug": slug, "doc_id": doc_id, "chunks_deleted": deleted}
 
 
 # --- Query -------------------------------------------------------------------
 @api_router.post("/workspace/{slug}/query", summary="Query a workspace")
-async def query_workspace(slug: str, body: QueryRequest):
+async def query_workspace(slug: str, body: QueryRequest, request: Request):
     import asyncio, time as _time
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
@@ -468,17 +501,26 @@ async def query_workspace(slug: str, body: QueryRequest):
         "duration_ms": duration_ms,
     }
     await asyncio.to_thread(db.append_log, slug, entry)
+    activity.record("query", ws, request, duration_ms=duration_ms)
     return result
 
 
 @api_router.post("/workspace/{slug}/query/stream", summary="Stream a query response")
-async def stream_query_workspace(slug: str, body: QueryRequest):
+async def stream_query_workspace(slug: str, body: QueryRequest, request: Request):
     import asyncio
     ws = await asyncio.to_thread(db.get_workspace, slug)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     async def _logging_stream():
+        start = _time.monotonic()
+        try:
+            async for chunk in _stream():
+                yield chunk
+        finally:
+            activity.record("query", ws, request, duration_ms=int((_time.monotonic() - start) * 1000))
+
+    async def _stream():
         async for chunk in query.stream_query_workspace(
             ws, body.question, prompt_suffix=body.prompt_suffix
         ):
@@ -547,7 +589,7 @@ async def create_chat_session(slug: str):
 
 
 @api_router.post("/workspace/{slug}/chat/{session_id}/stream", summary="Stream a chat response within a session")
-async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStreamRequest):
+async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStreamRequest, request: Request):
     """Send a message in an existing chat session and stream the response.
 
     The `history` field contains the last N conversation turns from the
@@ -562,6 +604,15 @@ async def stream_chat_session(slug: str, session_id: str, body: ChatSessionStrea
     history = [m.model_dump() for m in (body.history or [])]
 
     async def _logging_stream():
+        start = _time.monotonic()
+        try:
+            async for chunk in _stream():
+                yield chunk
+        finally:
+            activity.record("chat", ws, request, session_id=session_id, has_attachment=body.has_attachment or None,
+                            duration_ms=int((_time.monotonic() - start) * 1000))
+
+    async def _stream():
         async for chunk in query.stream_chat_session(
             session_id, ws, body.message,
             history=history,
@@ -675,6 +726,29 @@ def remove_doc(slug: str, doc_id: str):
 def remove_workspace_docs(slug: str):
     db.clear_docs(slug)
     return {"ok": True}
+
+
+@api_router.get("/activity", summary="Activity across all workspaces (CloudWatch Logs Insights)")
+async def get_activity(hours: int = 24, limit: int = 200, key_prefix: str = "", workspace: str = "", event: str = ""):
+    """Recent events, newest first, and counts per gateway key prefix, workspace and event.
+    Admin key only (no {slug} in the path, so workspace keys are refused)."""
+    import asyncio
+    if not config.ACTIVITY_LOG_GROUP:
+        raise HTTPException(status_code=503, detail="The activity log is turned off (ACTIVITY_LOG_GROUP is blank).")
+    try:
+        result = await asyncio.to_thread(activity.search, max(1, min(hours, 24 * 90)), max(1, min(limit, 1000)),
+                                         key_prefix, workspace, event)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read the activity log: {exc}")
+    # Every prefix any workspace uses, so the filter can offer ones with no activity yet
+    workspaces = await asyncio.to_thread(db.list_workspaces)
+    prefixes = {activity.key_prefix(ws) for ws in workspaces} | {c.get("key_prefix", "") for c in result["counts"]}
+    result["key_prefixes"] = sorted(p for p in prefixes if p)
+    result["workspaces"] = [{"slug": ws["slug"], "name": ws["name"], "key_prefix": activity.key_prefix(ws)}
+                            for ws in workspaces]
+    return result
 
 
 @api_router.get("/owners", summary="Who requested each chatbot made through intake")

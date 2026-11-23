@@ -34,6 +34,7 @@ const logoutBtn         = document.getElementById('logout-btn');
 const navBtns           = document.querySelectorAll('.nav-btn');
 const viewWorkspaces    = document.getElementById('view-workspaces');
 const viewSettings      = document.getElementById('view-settings');
+const viewActivity      = document.getElementById('view-activity');
 const viewWorkspaceDetail = document.getElementById('view-workspace-detail');
 
 const newWorkspaceBtn   = document.getElementById('new-workspace-btn');
@@ -101,6 +102,7 @@ async function apiFetch(path, options = {}) {
     headers: {
       'Accept': 'application/json',
       'X-API-Key': apiKey,
+      'X-Infochat-Source': 'admin-ui',
       ...(options.headers || {}),
     },
   });
@@ -238,6 +240,12 @@ async function router() {
     return;
   }
 
+  if (path === '/activity') {
+    _showViewDOM('activity');
+    loadActivity();
+    return;
+  }
+
   if (path === '/settings') {
     _showViewDOM('settings');
     loadGlobalSettings();
@@ -301,6 +309,7 @@ async function router() {
 function _showViewDOM(name) {
   viewWorkspaces.classList.add('hidden');
   viewSettings.classList.add('hidden');
+  viewActivity.classList.add('hidden');
   viewWorkspaceDetail.classList.add('hidden');
 
   navBtns.forEach(b => b.classList.toggle('active', b.dataset.view === name));
@@ -309,6 +318,8 @@ function _showViewDOM(name) {
     viewWorkspaces.classList.remove('hidden');
   } else if (name === 'settings') {
     viewSettings.classList.remove('hidden');
+  } else if (name === 'activity') {
+    viewActivity.classList.remove('hidden');
   } else if (name === 'workspace-detail') {
     viewWorkspaceDetail.classList.remove('hidden');
   }
@@ -337,6 +348,8 @@ function showView(name) {
     navigateTo('/workspaces');
   } else if (name === 'settings') {
     navigateTo('/settings');
+  } else if (name === 'activity') {
+    navigateTo('/activity');
   } else {
     // workspace-detail without a slug context — just switch DOM
     _showViewDOM(name);
@@ -470,6 +483,7 @@ async function loadWorkspaceSettings(slug) {
   ]);
   if (!wsRes.ok) return;
   const ws = await wsRes.json();
+  setAccessKeyShown(false);
   fillForm(workspaceSettingsForm, ws);
   loadSettingsModels(workspaceSettingsForm, wsSettingsMsg, ws, slug);
 
@@ -503,6 +517,15 @@ async function loadWorkspaceSettings(slug) {
     });
   }
 }
+
+const accessKeyToggle = document.getElementById('access-key-toggle');
+function setAccessKeyShown(shown) {
+  workspaceSettingsForm.elements['access_key'].type = shown ? 'text' : 'password';
+  accessKeyToggle.textContent = shown ? 'Hide' : 'Show';
+}
+accessKeyToggle.addEventListener('click', () => {
+  setAccessKeyShown(workspaceSettingsForm.elements['access_key'].type === 'password');
+});
 
 workspaceSettingsForm.elements['api_key'].addEventListener('change', () => {
   loadSettingsModels(workspaceSettingsForm, wsSettingsMsg, currentModels(workspaceSettingsForm), currentWorkspaceSlug);
@@ -1320,6 +1343,112 @@ function escHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+// =====================================================
+// ACTIVITY (all workspaces, from the CloudWatch activity log)
+// =====================================================
+
+const activityFilters = document.getElementById('activity-filters');
+const activityMsg     = document.getElementById('activity-msg');
+const activityCounts  = document.getElementById('activity-counts');
+const activityEvents  = document.getElementById('activity-events');
+let activityWorkspaces = [];
+let activityRequest = 0;
+
+const EVENT_LABELS = {
+  chat: 'Chat', query: 'Query', upload: 'Upload', delete_document: 'Document deleted',
+  workspace_create: 'Workspace created', workspace_update: 'Workspace updated',
+  workspace_delete: 'Workspace deleted', settings_update: 'Global settings updated',
+};
+
+function fillSelect(select, options, allLabel) {
+  const current = select.value;
+  select.innerHTML = `<option value="">${escHtml(allLabel)}</option>` +
+    options.map(([value, label]) => `<option value="${escHtml(value)}">${escHtml(label)}</option>`).join('');
+  // Keep the choice if it is still offered
+  select.value = options.some(([v]) => v === current) ? current : '';
+}
+
+/** Only list workspaces under the chosen key prefix. */
+function fillWorkspaceFilter() {
+  const prefix = activityFilters.elements['key_prefix'].value;
+  const list = activityWorkspaces.filter(w => !prefix || w.key_prefix === prefix);
+  fillSelect(activityFilters.elements['workspace'], list.map(w => [w.slug, w.name]), 'All workspaces');
+}
+
+async function loadActivity() {
+  const f = activityFilters.elements;
+  const params = new URLSearchParams({ hours: f['hours'].value, limit: 200 });
+  for (const name of ['key_prefix', 'workspace', 'event']) if (f[name].value) params.set(name, f[name].value);
+
+  const request = ++activityRequest;
+  activityMsg.textContent = 'Loading...';
+  const res = await apiFetch(`/activity?${params}`);
+  if (request !== activityRequest) return;  // a newer filter change won
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    activityMsg.textContent = err.detail || `Could not load activity (${res.status}).`;
+    activityCounts.innerHTML = activityEvents.innerHTML = '';
+    return;
+  }
+  const data = await res.json();
+  activityWorkspaces = data.workspaces;
+  fillSelect(f['key_prefix'], data.key_prefixes.map(p => [p, p]), 'All key prefixes');
+  fillWorkspaceFilter();
+  renderActivityCounts(data.counts);
+  renderActivityEvents(data.events);
+  activityMsg.textContent = data.events.length >= 200 ? 'Showing the newest 200 events.' : '';
+}
+
+function renderActivityCounts(counts) {
+  // One row per key prefix + workspace; events folded into columns
+  const rows = new Map();
+  for (const c of counts) {
+    const key = `${c.key_prefix || ''}|${c.workspace || ''}`;
+    if (!rows.has(key)) rows.set(key, { key_prefix: c.key_prefix, workspace: c.workspace, name: c.workspace_name,
+                                        chat: 0, query: 0, upload: 0, other: 0, total: 0 });
+    const r = rows.get(key);
+    const n = Number(c.count) || 0;
+    const col = ['chat', 'query', 'upload'].includes(c.event) ? c.event : 'other';
+    r[col] += n;
+    r.total += n;
+  }
+  const sorted = [...rows.values()].sort((a, b) => b.total - a.total);
+  activityCounts.innerHTML = sorted.length ? sorted.map(r => `<tr>
+      <td>${escHtml(r.key_prefix || '—')}</td>
+      <td>${escHtml(r.name || r.workspace || '—')}</td>
+      <td class="num">${r.chat}</td><td class="num">${r.query}</td><td class="num">${r.upload}</td>
+      <td class="num">${r.other}</td><td class="num"><strong>${r.total}</strong></td>
+    </tr>`).join('') : '<tr><td colspan="7" class="muted">No activity in this range.</td></tr>';
+}
+
+function activityDetails(e) {
+  const parts = [];
+  if (e.filename) parts.push(e.filename);
+  if (e.chunks) parts.push(`${e.chunks} chunk${e.chunks == 1 ? '' : 's'}`);
+  if (e.duration_ms) parts.push(`${(Number(e.duration_ms) / 1000).toFixed(1)} s`);
+  if (e.has_attachment) parts.push('with attachment');
+  if (e.changed) parts.push(`changed: ${String(e.changed).replace(/[\[\]"]/g, '')}`);
+  return parts.join(' · ');
+}
+
+function renderActivityEvents(events) {
+  activityEvents.innerHTML = events.length ? events.map(e => `<tr>
+      <td>${escHtml(formatDateTime(e['@timestamp'].replace(' ', 'T') + 'Z'))}</td>
+      <td>${escHtml(EVENT_LABELS[e.event] || e.event)}</td>
+      <td title="${escHtml(e.workspace || '')}">${escHtml(e.workspace_name || e.workspace || '—')}</td>
+      <td>${escHtml(e.key_prefix || '—')}</td>
+      <td>${escHtml(e.caller || '')}</td>
+      <td>${escHtml(e.source || '')}</td>
+      <td>${escHtml(activityDetails(e))}</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="muted">No events in this range.</td></tr>';
+}
+
+activityFilters.addEventListener('submit', (e) => { e.preventDefault(); loadActivity(); });
+activityFilters.addEventListener('change', (e) => {
+  if (e.target.name === 'key_prefix') fillWorkspaceFilter();
+  loadActivity();
+});
 
 // =====================================================
 // INIT

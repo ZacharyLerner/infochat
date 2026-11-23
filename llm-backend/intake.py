@@ -32,6 +32,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
+import activity
 import config
 import db
 import embedding
@@ -150,6 +151,7 @@ def _create(body: ChatbotRequest) -> dict:
         raise HTTPException(status_code=502, detail=f"The chatbot was not created: could not reach {down}. Try again shortly.")
 
     logger.info("intake: created '%s' (%s) for %s", body.name, slug, body.username)
+    activity.record("workspace_create", ws, caller="intake", source="intake")
     return {"name": body.name, **links(slug)}
 
 
@@ -176,6 +178,7 @@ async def get_chatbot(slug: str):
 async def test_chatbot(slug: str, body: TestRequest):
     ws = await asyncio.to_thread(_intake_workspace, slug)
     result = await asyncio.to_thread(query.query_workspace, ws, body.question)
+    activity.record("query", ws, caller="intake", source="intake")
     docs = (result.get("sources") or {}).get("documents", [])
     return {
         "answer": result.get("answer", ""),

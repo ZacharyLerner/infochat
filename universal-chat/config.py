@@ -9,7 +9,8 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 API_URL: str = os.getenv("RAG_API_URL")
 API_KEY: str = os.getenv("RAG_API_KEY", "")
-HEADERS: dict = {"X-API-Key": API_KEY} if API_KEY else {}
+# X-Infochat-Source labels this service's calls in the backend's activity log
+HEADERS: dict = {"X-Infochat-Source": "chat", **({"X-API-Key": API_KEY} if API_KEY else {})}
 # CA for the backend's self-signed HTTPS cert (a copy of its /certs/cert.pem); unset = system CAs.
 RAG_VERIFY = os.getenv("RAG_CA_FILE") or True
 
